@@ -1,14 +1,13 @@
 ---
 name: analyze-workflow-failures
-description: Given a GitHub Actions workflow run number or Solutions Run UUID, analyze the run to identify the first failed step, retrieve its logs, and determine the root cause of failures.
+description: Given a Solutions Run UUID, analyze the run to identify the first failed step, retrieve its logs, and determine the root cause of failures.
 ---
 
 # Skill: Analyze GitHub Actions Workflow Run Failures
 
 ## Purpose
-Given a **GitHub Run ID** or a **Solutions Run UUID**, analyze the run to identify the first
-failed step, retrieve its logs (including from Swift object storage), and determine the root
-cause of failures.
+Given a **Solutions Run UUID**, analyze the run to identify the first failed step, retrieve
+its logs (including from Swift object storage), and determine the root cause of failures.
 
 > **Important:** By the time this skill is invoked, the failing job's infrastructure is already gone.
 > The goal is purely **diagnosis** — understanding *why* it failed — not remediation.
@@ -53,15 +52,22 @@ If no file exists yet, use `steps/_template.md` as a guide and create one after 
 
 | Term | Description |
 |---|---|
-| **GitHub Run ID** | The numeric ID of a GitHub Actions workflow run (e.g., `23388633087`). Used with `gh run view`. |
+| **GitHub Run ID** | The numeric ID of a GitHub Actions workflow run (e.g., `23388633087`). Obtained from `jobs.json` in Swift; used with `gh run view`. |
 | **Solutions Run UUID** | A UUID (e.g., `63cd57c4-cba2-48a7-95e9-fb01ae0600cb`) generated per pipeline execution, used to identify the run in Weebl and as the Swift object storage prefix for collected logs. |
 
-These are **different things**. The GitHub Run ID is used to look up CI metadata; the Solutions Run UUID is used to find actual deployment logs in Swift.
+## Source Repositories
+
+| Codebase | Local path | Purpose |
+|---|---|---|
+| `sqa-cloud-deployment-pipeline` | `~/sqa-cloud-deployment-pipeline/` | GitHub Actions workflow definitions, runner scripts |
+| `fce` (Foundation Cloud Engine) | `~/cpe/foundation/` | Python library used in most pipeline steps |
+
+When a stack trace or error references a source file, look it up in the appropriate local repo
+before drawing conclusions. Do **not** fetch code from GitHub or any remote — use only the
+local checkouts above.
 
 ## Inputs
-- `run_id`: GitHub Actions workflow run number (e.g., `23388633087`), **OR**
-- `uuid`: Solutions Run UUID (e.g., `63cd57c4-cba2-48a7-95e9-fb01ae0600cb`) — the skill can start from either
-- `repository_path`: Local path to the git repository (optional, defaults to current working directory)
+- `uuid`: Solutions Run UUID (e.g., `63cd57c4-cba2-48a7-95e9-fb01ae0600cb`) — **required**
 - `ignore_patterns`: Steps to ignore (optional, e.g., "log collection", "cleanup")
 
 ## Steps
@@ -73,7 +79,7 @@ These are **different things**. The GitHub Run ID is used to look up CI metadata
 
 ### On Entry: Check for Existing Analysis First
 
-**If a UUID was provided**, check whether this run has already been analyzed before launching any subagents:
+Check whether this run has already been analyzed before launching any subagents:
 
 ```bash
 ls outputs/<UUID>-analysis.md 2>/dev/null && head -5 outputs/<UUID>-analysis.md
@@ -85,18 +91,10 @@ subagents or download anything until the user confirms. If no file exists, conti
 
 ---
 
-### On Entry: Determine What You Have and Start Parallel Work
+### On Entry: Start Parallel Work
 
-**If UUID is provided as input:**
 - **First**, launch the `jobs.json` fetch as a background Haiku subagent — it is small (~50 KB) and returns quickly with the `run_id` and step list you need to drive the rest of the analysis
 - **Immediately after**, launch Step A (Swift bundle download) as a second background Haiku subagent — it is large and benefits from maximum head-start
-- If a `run_id` was also provided, proceed with Steps 1–2 in parallel
-- Skip Step 3 (UUID extraction) — you already have it
-
-**If only `run_id` is provided:**
-- Start Steps 1–2 to fetch and save GitHub logs
-- The moment you extract the UUID in Step 3, **immediately** launch Step A as a background subagent
-- Continue with Step 4 while the download runs in parallel
 
 ---
 
@@ -106,6 +104,11 @@ subagents or download anything until the user confirms. If no file exists, conti
 > complete before continuing with GitHub log analysis — it runs in parallel.
 > **Use model `claude-haiku-4.5`** — this is pure mechanical work (MCP call + curl + tar),
 > no reasoning required.
+
+> **⚠️ If the Swift MCP server is unavailable or returns an error:**
+> Stop immediately. Report to the user that Swift is unavailable and that analysis cannot
+> proceed without the artifacts. Do **not** attempt workarounds, alternative download methods,
+> or partial analysis based only on GitHub logs.
 
 **Before launching the subagent**, determine the work directory from your `<session_context>`:
 it is the `files/` subdirectory of the session folder listed there
@@ -131,22 +134,54 @@ The subagent must:
 > responsible for cleanup. Having all logs available persistently is more important than
 > disk tidiness.
 
-By the time you reach Step 5 (Log Analysis), `<work_dir>/<UUID>/` should already be populated.
-If the subagent is still running, wait for it before proceeding to Step 5.
+By the time you reach Step 4 (Log Analysis), `<work_dir>/<UUID>/` should already be populated.
+If the subagent is still running, wait for it before proceeding to Step 4.
 
 ---
 
-### 1. Get Run Overview
+### 1. Obtain the GitHub Run ID from Swift
+
+The `jobs.json` fetch subagent (launched on entry) provides the `run_id`. Parse it:
+
+```bash
+python3 -c "
+import json, sys
+jobs = json.load(open('<work_dir>/<uuid>-jobs.json'))
+for j in jobs['jobs']:
+    print(j['name'], j['conclusion'], j['run_id'])
+"
+```
+
+> **Why `stage_object` not `get_object`?** `jobs.json` is ~50 KB — `get_object` returns it
+> inline and the output gets truncated to a temp file, requiring extra parsing steps.
+> `stage_object` returns a download URL so you can `curl` it straight to disk.
+
+`jobs.json` contains the full GitHub API job response, including `run_id`, `run_url`,
+`html_url`, branch, conclusion, and per-step details. It also makes a useful quick triage
+source — step names and conclusions without needing to call `gh`.
+
+Example:
+```json
+{
+  "jobs": [{
+    "run_id": 23388633087,
+    "run_url": "https://api.github.com/repos/canonical/sqa-cloud-deployment-pipeline/actions/runs/23388633087",
+    "html_url": "https://github.com/canonical/sqa-cloud-deployment-pipeline/actions/runs/23388633087/job/68047963001",
+    "head_branch": "betterssh",
+    "conclusion": "failure",
+    ...
+  }]
+}
+```
+
+### 2. Get Run Overview and Identify Failed Steps
 ```bash
 gh run view <run_id>
 ```
 
-Parse output to:
-- Identify all jobs and their statuses (✓ = success, X = failure, - = skipped)
-- Find the first failed step
-- Note the substrate, cluster, and branch from context
+Parse output to identify all jobs and their statuses (✓ = success, X = failure, - = skipped),
+find the first failed step, and note the substrate, cluster, and branch from context.
 
-### 2. Identify Failed Steps
 ```bash
 gh run view <run_id> --log-failed 2>&1 > /tmp/run_<run_id>_failed.log
 wc -l /tmp/run_<run_id>_failed.log
@@ -164,63 +199,7 @@ Extract context around the first exit code error:
 sed -n '<start>,<end>p' /tmp/run_<run_id>_failed.log | grep -v "^\(Run the pipeline.*\*\*\*\)$" | cat
 ```
 
-### 3. Extract the Solutions Run UUID
-
-The UUID is logged early in the run and appears repeatedly in the `job_uuid:` field:
-```bash
-grep -m3 "job_uuid:" /tmp/run_<run_id>_failed.log
-```
-
-Also check for the UUID generated during setup:
-```bash
-grep -oP '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' /tmp/run_<run_id>_failed.log | sort -u
-```
-
-The **Solutions Run UUID** is the value that appears next to `job_uuid:` in the Weebl reporting steps.
-
-> **As soon as the UUID is identified here, launch Step A as a background subagent** before
-> continuing to Step 4. This maximises the time the download has to complete before you need
-> the logs in Step 5.
-
-#### Reverse lookup: GitHub Run ID from Solutions Run UUID
-
-If you only have a Solutions Run UUID (e.g. from Weebl or a Swift URL), fetch `jobs.json`
-**directly from Swift** — do **not** wait for the full bundle download.
-Launch a **Haiku subagent** in parallel with Step A to do this:
-
-```python
-# Stage the object to get a download URL (avoids inline truncation)
-url = swift-mcp-stage_object(key="<UUID>/generated/github-runner/jobs.json")
-# Then download and parse locally (use <work_dir> from session_context/files/)
-curl -fsSL <url> -o <work_dir>/<uuid>-jobs.json
-python3 -c "import json,sys; jobs=json.load(open('<work_dir>/<uuid>-jobs.json')); [print(j['name'], j['conclusion'], j['run_id']) for j in jobs['jobs']]"
-```
-
-Use `claude-haiku-4.5` for this subagent — it's a mechanical fetch+parse, no reasoning needed.
-
-> **Why `stage_object` not `get_object`?** `jobs.json` is ~50 KB — `get_object` returns it
-> inline and the output gets truncated to a temp file, requiring extra parsing steps.
-> `stage_object` returns a download URL so you can `curl` it straight to disk.
-`jobs.json` contains the full GitHub API job response, including `run_id`, `run_url`,
-`html_url`, branch, conclusion, and per-step details.
-
-The `run_id` field in the first job entry is the GitHub Run ID. Example:
-```json
-{
-  "jobs": [{
-    "run_id": 23388633087,
-    "run_url": "https://api.github.com/repos/canonical/sqa-cloud-deployment-pipeline/actions/runs/23388633087",
-    "html_url": "https://github.com/canonical/sqa-cloud-deployment-pipeline/actions/runs/23388633087/job/68047963001",
-    "head_branch": "betterssh",
-    "conclusion": "failure",
-    ...
-  }]
-}
-```
-
-This file also makes a useful quick triage source — it contains step names and conclusions without needing to call `gh`.
-
-### 4. Know Your Substrate
+### 3. Know Your Substrate
 
 The **substrate** determines which logs are available. Check `SUBSTRATE` in the GitHub Actions
 environment variables early — it shapes the entire investigation strategy.
@@ -234,7 +213,7 @@ environment variables early — it shapes the entire investigation strategy.
 | `aws` / `azure` | ❌ No | Public cloud; no MAAS |
 
 **MAAS logs are only present for `virtual_maas` and `dedicated_maas` substrates.** For all
-other substrates, skip Steps 4c and 5 entirely — there will be no `generated/maas/logs-*.tgz`.
+other substrates, skip Steps 4b and 5 entirely — there will be no `generated/maas/logs-*.tgz`.
 
 #### Distinguishing virtual_maas from dedicated_maas
 
@@ -259,18 +238,18 @@ the same cluster. The **first portion of these logs may be months old** — from
 pipeline executions on the same infra. This is expected and harmless.
 
 **When analysing, only look at the log section that aligns with the timestamp of the job
-being investigated.** Locate the job's start time from the GitHub Actions log and filter
-to that window:
+being investigated.** Locate the job's start time from `jobs.json` (`started_at` field) and
+filter to that window:
 
 ```bash
-# Get the job start time from the GH Actions log
-grep "Start the workflow\|Report the job to weebl" /tmp/run_<run_id>_failed.log | head -3
+# Get the job start time from jobs.json
+python3 -c "import json; j=json.load(open('<work_dir>/<uuid>-jobs.json')); [print(x['started_at'], x['name']) for x in j['jobs']]"
 
 # Filter MAAS syslog to the relevant time window (e.g., 2026-03-19T18:)
 grep "2026-03-19T18:" <work_dir>/maas-logs/10.241.144.2/var/log/syslog | head -20
 ```
 
-### 5. Use Logs from Swift
+### 4. Use Logs from Swift
 
 If Step A (background subagent) has not yet reported completion, wait for it before proceeding.
 All artifacts are already available under `<work_dir>/<uuid>/` — no further download is needed.
@@ -288,7 +267,7 @@ Key layout:
 │   ├── project_comp.log
 │   ├── features.yaml / project_features.yaml
 │   ├── version_collector_<layer>.log
-│   ├── sshtest.txt                — SSH tunnel health log (virtual_maas only; see 5a)
+│   ├── sshtest.txt                — SSH tunnel health log (virtual_maas only; see 4a)
 │   ├── github-runner/
 │   │   ├── jobs.json              — GitHub API job metadata (run_id, steps, conclusions)
 │   │   └── run.log                — full runner log
@@ -300,7 +279,7 @@ Key layout:
 └── ...
 ```
 
-#### 5a. Quick triage from local files
+#### 4a. Quick triage from local files
 
 ```bash
 # Tail of all log streams:
@@ -313,7 +292,7 @@ python3 -m json.tool <work_dir>/<uuid>/generated/github-runner/jobs.json | head 
 cat <work_dir>/<uuid>/generated/maas/log.txt
 ```
 
-#### 5a-i. SSH tunnel health check (virtual_maas only)
+#### 4a-i. SSH tunnel health check (virtual_maas only)
 
 > **For `virtual_maas` substrates, always check `sshtest.txt` before diving into logs.**
 
@@ -348,7 +327,7 @@ cat <work_dir>/<uuid>/generated/sshtest.txt
 > treat Pokémon-named hostnames in MAAS logs as evidence that the substrate was dedicated_maas
 > — always check `sshtest.txt` and trust `jobs.json` for the substrate name.
 
-#### 5b. Extract the MAAS infrastructure logs archive
+#### 4b. Extract the MAAS infrastructure logs archive
 
 > **Only applicable for `virtual_maas` and `dedicated_maas` substrates.** Skip for all others.
 
@@ -366,7 +345,7 @@ for d in <work_dir>/maas-logs/*/; do
 done
 ```
 
-### 6. Analyze MAAS Logs
+### 5. Analyze MAAS Logs
 
 > **Only applicable for `virtual_maas` and `dedicated_maas` substrates.**
 
@@ -402,7 +381,7 @@ grep -rh "error_string" <work_dir>/maas-logs/*/var/log/syslog 2>/dev/null \
   | grep -oP 'infra\d+ maas-regiond\[\d+\]' | sort | uniq -c | sort -rn
 ```
 
-### 7. Extract Error Details
+### 6. Extract Error Details
 
 From the logs, extract:
 - **Exception type and message**: The specific error that occurred
@@ -420,7 +399,7 @@ From the logs, extract:
 - `django.db.utils.ProgrammingError`: DB schema mismatch — check migrations
 - `ServerError: 400 Bad Request (Failed to render preseed: ...)`: MAAS API error — check DB schema
 
-### 8. Perform Root Cause Analysis
+### 7. Perform Root Cause Analysis
 
 > **Do not attribute failures to leftover state from a previous run** unless you have direct,
 > specific evidence — for example: a named resource whose creation timestamp clearly pre-dates
@@ -554,7 +533,7 @@ use `outputs/<run_id>-analysis.md` as a fallback.
 ## Limitations
 
 - **Requires authentication**: `gh` CLI must be authenticated
-- **Swift access**: Requires the Swift MCP server to be available
+- **Swift access**: Required — if the Swift MCP server is unavailable, stop and report; do not attempt workarounds
 - **Bundle size**: The full UUID bundle can be 50–100 MB — `stage_uuid_bundle` + `curl` (launched as background subagent) handles this efficiently; the MAAS logs tgz inside is an additional nested archive to extract separately
 - **Domain knowledge**: Some errors require specific MAAS/Juju/Sunbeam product knowledge
 - **Diagnosis only**: This skill identifies root causes. The failing infrastructure is gone — no fix can be applied retroactively. Findings should be used to inform future preventive action.
@@ -640,3 +619,4 @@ The user will review with `git diff` and commit when satisfied.
 - **v2.42** (2026-04-15): Updated `steps/sunbeam_maas_deploy.md` (v1.1) — Pattern A confirmed in two additional runs (UUIDs f3d1c1f9, e9de9830, same substrate/cluster dh1_j2); all three linked to bug lp:openstack:2148312.
 - **v2.43** (2026-04-15): Updated `steps/sunbeam_maas_deploy.md` (v1.4) — sixth confirmed occurrence of Pattern A, UUID 0b8b31f3, run 24478433479, dedicated_maas dh1_j2; juju-3 cloud-init finished 42s before deadline but Juju agent registration did not complete in time; no I/O errors in QEMU logs.
 - **v2.44** (2026-04-21): Added Pattern B to `steps/sunbeam_launch_vm.md` (v1.1) — Nova BUILD timeout: VM never reached ACTIVE (distinct from Pattern A where VM is ACTIVE but SSH unreachable); `sunbeam launch` polls ~6m15s then reports "Timeout waiting for Server:<id> to transition to ACTIVE"; misleading "Please run sunbeam configure first" is a generic error; from run 24664528578 (UUID a44c1e26, tor3-sqa-testflinger cluster_2, main, 2026-04-20). Swift unavailable during analysis.
+- **v2.45** (2026-04-26): Input simplified to UUID only (GitHub Run ID is no longer accepted from user; always obtained from `jobs.json` in Swift). Added Source Repositories table: workflow source in `~/sqa-cloud-deployment-pipeline/`, fce source in `~/cpe/foundation/`. Added hard stop on Swift MCP unavailability — no workarounds, report and stop. Renumbered steps 3→2, 4→3, 5→4, 6→5, 7→6, 8→7.
