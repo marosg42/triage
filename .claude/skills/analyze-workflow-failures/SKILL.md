@@ -23,12 +23,14 @@ This skill is split across files to keep context lean. Only load what you need:
 ├── steps/
 │   ├── _template.md                                    ← template for new step files
 │   ├── existing_juju_maas_controller_microk8s.md       ← per-step logs, patterns, grep hints
+│   ├── juju_k8s_controller.md                          ← per-step logs, patterns, grep hints
 │   ├── juju_kubernetes_controller.md                   ← per-step logs, patterns, grep hints
 │   ├── juju_maas_controller.md                         ← per-step logs, patterns, grep hints
 │   ├── juju_openstack_controller.md                    ← per-step logs, patterns, grep hints                         ← per-step logs, patterns, grep hints
 │   ├── maas.md                                         ← per-step logs, patterns, grep hints
 │   ├── magpie.md                                       ← per-step logs, patterns, grep hints
 │   ├── metallb_microk8s.md                             ← per-step logs, patterns, grep hints
+│   ├── microk8s.md                                     ← per-step logs, patterns, grep hints
 │   ├── sunbeam_deploy.md                               ← per-step logs, patterns, grep hints
 │   ├── sunbeam_maas_deploy.md                          ← per-step logs, patterns, grep hints
 │   ├── sunbeam_prepare_env.md                          ← per-step logs, patterns, grep hints
@@ -620,3 +622,5 @@ The user will review with `git diff` and commit when satisfied.
 - **v2.43** (2026-04-15): Updated `steps/sunbeam_maas_deploy.md` (v1.4) — sixth confirmed occurrence of Pattern A, UUID 0b8b31f3, run 24478433479, dedicated_maas dh1_j2; juju-3 cloud-init finished 42s before deadline but Juju agent registration did not complete in time; no I/O errors in QEMU logs.
 - **v2.44** (2026-04-21): Added Pattern B to `steps/sunbeam_launch_vm.md` (v1.1) — Nova BUILD timeout: VM never reached ACTIVE (distinct from Pattern A where VM is ACTIVE but SSH unreachable); `sunbeam launch` polls ~6m15s then reports "Timeout waiting for Server:<id> to transition to ACTIVE"; misleading "Please run sunbeam configure first" is a generic error; from run 24664528578 (UUID a44c1e26, tor3-sqa-testflinger cluster_2, main, 2026-04-20). Swift unavailable during analysis.
 - **v2.45** (2026-04-26): Input simplified to UUID only (GitHub Run ID is no longer accepted from user; always obtained from `jobs.json` in Swift). Added Source Repositories table: workflow source in `~/sqa-cloud-deployment-pipeline/`, fce source in `~/cpe/foundation/`. Added hard stop on Swift MCP unavailability — no workarounds, report and stop. Renumbered steps 3→2, 4→3, 5→4, 6→5, 7→6, 8→7.
+- **v2.46** (2026-04-26): Added `steps/microk8s.md` (v1.0) — Pattern A: Juju machine agent `down` while unit workload completes successfully; machine agent fails to maintain heartbeat with controller while unit sub-process runs normally; `juju-wait --machine-error-timeout 1800` fires after 30 min; from run 24889818217 (UUID 951e7528, tor3-sqa-virtual_maas cluster_3, Juju 4.0.8, 2026-04-24).
+- **v2.47** (2026-04-29): Added `steps/juju_k8s_controller.md` (v1.1) — Pattern A: Juju 4.0.9 (`4.0/candidate`, snap rev 34852) fails to bootstrap on AKS with `invalid reference format` in `podcfg.tagImagePath`; root cause is a snap build defect in commit `29278b68a4` (2026-04-16): `JujudOCINamespace` changed from constant to variable for linker injection, but `snapcraft.yaml` passes it as empty string → `imageRepoToPath` constructs `/jujud-operator` (leading slash) → `reference.Parse` rejects it; `4.0/stable` unaffected (pre-dates the commit); from runs 25087533337 (UUID b4c9324a) and 25098199361, ext-sqa-aks useast, 2026-04-29.
