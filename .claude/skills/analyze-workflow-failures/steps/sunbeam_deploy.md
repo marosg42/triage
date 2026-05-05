@@ -662,6 +662,215 @@ grep -h "metadata/status/mg64te" /tmp/maas-logs/*/var/log/syslog \
 
 ---
 
+### Pattern: `cinder-volume` install hook blocks on `(amqp) integration missing` during parallel joins — 20-minute wait expires
+
+**Applies to:** `sunbeam_deploy` step, `sunbeam cluster join` phase, multi-node parallel join on `tor3-sqa-testflinger`
+
+**Symptom (in GitHub Actions log):**
+```
+subprocess.CalledProcessError: Command
+  ['ssh', ..., 'behaim.maas', '--', 'sunbeam', 'cluster', 'join', '<token>',
+   '--role', 'compute', '--role', 'storage', '--accept-defaults']
+returned non-zero exit status 1.
+```
+
+**In STDERR of the failing join (captured in GitHub Actions log):**
+```
+wait timed out after 1199.999998071s
+Status(
+  model=ModelStatus(name='openstack-machines', ...),
+  apps={
+    'cinder-volume': AppStatus(
+      app_status=StatusInfo(current='blocked', message='(amqp) integration missing', ...),
+      units={
+        'cinder-volume/1': UnitStatus(
+          workload_status=StatusInfo(current='blocked', message='(amqp) integration missing', since='18:53:09Z'),
+          juju_status=StatusInfo(current='executing', message='running install hook', since='18:53:08Z'),
+          machine='1',
+        ),
+      },
+    ),
+    ...
+  }
+)
+```
+
+**Key signals:**
+- Exit code **1** (not 255) — this is the remote `sunbeam cluster join` process timing out, not an SSH disconnection
+- `wait timed out after 1199.999998071s` — the 1200-second (20-minute) internal `juju wait-for model openstack-machines` inside `sunbeam cluster join`
+- A `cinder-volume/N` unit on **a different node** (not the joining one) is stuck in `executing: running install hook` with `blocked: (amqp) integration missing`
+- The `amqp` relation IS listed as established at the app level — this is a unit-level timing issue, not a missing relation
+- The stuck unit is on a node that joined earlier in the same parallel batch (e.g., `avery.maas` joined at the same time as `behaim.maas`)
+- After the 20-minute wait expires, **other parallel joins continue and eventually succeed** — confirming the model was still converging, not broken
+- In `generated/sunbeam/sunbeam_cluster_list.txt`: the "failing" node (e.g., `behaim`) IS present with its roles `active` — the node joined successfully despite the exit code 1
+- In the final `generated/sunbeam/juju_status_openstack-machines.txt`: the `cinder-volume/N` unit that was blocked shows `active idle` — it self-healed after the timeout fired
+
+**Root cause:** All cluster joins run in parallel via `concurrent.futures.ThreadPoolExecutor`. Each node's `sunbeam cluster join` independently waits up to 1200 seconds for the entire `openstack-machines` Juju model to converge. When many nodes join simultaneously, their Juju units (including `cinder-volume` on storage-role nodes) start their install hooks concurrently. The `cinder-volume` install hook:
+1. Runs `apt-get install` and charm setup
+2. Sets `status-set blocked "(amqp) integration missing"` while waiting for RabbitMQ to deliver credentials
+3. Remains in this state until the install hook completes and the amqp relation-joined hook fires
+
+Under concurrent load, this install hook can take >20 minutes. If another node's 1200-second wait starts while the install hook is still running, it will expire before the hook finishes. The failure is a **false negative**: the node itself joined correctly, and the model converges shortly after the timeout.
+
+**Timeline signature:**
+```
+18:33:25  All 6 parallel joins launched simultaneously
+18:53:08  cinder-volume/1 starts install hook on avery.maas (newly joined, storage role)
+18:53:09  cinder-volume/1 sets blocked: (amqp) integration missing
+18:53:09  behaim's internal juju wait-for starts (1200s countdown)
+19:13:15  behaim's 1200s wait expires → sunbeam cluster join exits 1
+19:20:06  bohr.maas join succeeds (47 min total)
+19:24:06  elvey.maas join succeeds (51 min total)
+19:38:40  another node join succeeds
+19:41:47  another node join succeeds
+19:42:49  last join succeeds — cinder-volume/1 long since recovered
+19:42:49  deploy_sunbeam.py calls future.result() for behaim → CalledProcessError raised
+```
+
+**How to confirm it's a false negative:**
+```bash
+# Check if the node is actually in the cluster:
+grep "behaim\|<failing_node>" generated/sunbeam/sunbeam_cluster_list.txt
+
+# Check if cinder-volume eventually recovered:
+grep "cinder-volume" generated/sunbeam/juju_status_openstack-machines.txt | grep -v "active"
+# Expect no output if all units are active
+
+# Check other joins completed successfully:
+grep "Node joined cluster" /tmp/run_<id>_failed.log
+```
+
+**See also:** LP bug #2121929 ("parallel joins resulted in ReapplyHypervisorStep failure") — same mechanism, different unit (`openstack-hypervisor` instead of `cinder-volume`).
+
+**Snap versions:**
+- `openstack` snap: channel `2024.1/beta`, ADDON `sunbeam_2024.1_beta`
+- Juju: 3.6.21
+
+**Observed in:**
+- Run 25179144394 (UUID: a1c69781-fc6e-49f5-a563-6e8c20ef6c52, tor3-sqa-testflinger cluster_2,
+  7 Pokémon-named testflinger nodes, behaim.maas roles compute+storage, avery.maas roles control+storage,
+  main branch, 2026-04-30)
+
+---
+
+### Pattern: `k8s` cluster-relation-changed hooks + MetalLB/CSI pods not ready block parallel join wait — 30-minute wait expires
+
+**Applies to:** `sunbeam_deploy` step, `sunbeam cluster join` phase, multi-node parallel join on `tor3-sqa-testflinger`
+
+**Symptom (in GitHub Actions log):**
+```
+subprocess.CalledProcessError: Command
+  ['ssh', ..., 'crustle.maas', '--', 'sunbeam', 'cluster', 'join', '<token>',
+   '--role', 'control', '--role', 'compute', '--accept-defaults']
+returned non-zero exit status 1.
+```
+
+**In STDERR of the failing joins (both at ~18:33Z):**
+```
+wait timed out after 1799.999997804s
+Status(
+  model=ModelStatus(name='openstack-machines', ...),
+  apps={
+    'k8s': AppStatus(
+      app_status=StatusInfo(current='waiting',
+        message='Unready Pods: kube-system/ck-storage-rawfile-csi-node-hv4cx,
+                               metallb-system/metallb-speaker-5m8cn', ...),
+      units={
+        'k8s/0': UnitStatus(
+          workload_status=StatusInfo(current='waiting',
+            message='Unready Pods: kube-system/ck-storage-rawfile-csi-node-hv4cx,
+                                     metallb-system/metallb-speaker-5m8cn',
+            since='18:31:52Z'),
+          juju_status=StatusInfo(current='executing',
+            message='running cluster-relation-changed hook for k8s/2',
+            since='18:31:46Z'),
+          machine='0',
+        ),
+        'k8s/1': UnitStatus(
+          workload_status=StatusInfo(current='active', message='Ready', ...),
+          juju_status=StatusInfo(current='executing',
+            message='running cluster-relation-changed hook for k8s/2',
+            since='18:33:05Z'),
+          machine='1',
+        ),
+      },
+    ),
+    ...
+  }
+)
+```
+
+**Note: Two nodes failed simultaneously (7 seconds apart).** Both anonster.maas and crustle.maas emitted
+`wait timed out after ~1800s` at 18:33:16Z and 18:33:23Z respectively. The `CalledProcessError` surfaces
+at 18:56:46Z — when the last of the 6 parallel futures completes — because `future.result()` is called
+in iteration order after all futures are done.
+
+**Key signals:**
+- Exit code **1** (not 255) — remote `sunbeam cluster join` process timing out, not SSH failure
+- `wait timed out after 1799.999...s` — the 1800-second (30-minute) internal `juju wait-for model openstack-machines` (note: 1800s here vs 1200s in the cinder-volume/amqp variant — timeout constant differs between snap revisions)
+- `k8s/N` workload `waiting: Unready Pods: kube-system/ck-storage-rawfile-csi-node-*` — pods are from newly-joined nodes' DaemonSets, not yet scheduled/running
+- `k8s/0` and `k8s/1` juju agents `executing: running cluster-relation-changed hook for k8s/<new>` — existing k8s units processing new member admission
+- **Two nodes fail nearly simultaneously** (within seconds of each other) — both had the same 1800s deadline starting from the same batch dispatch
+- Failed nodes' roles ARE in the cluster: check `sunbeam_cluster_list.txt`
+- All units `active idle` in final `juju_status_openstack-machines.txt`
+
+**Root cause:** When multiple nodes join simultaneously as new Kubernetes worker nodes, each triggers
+`cluster-relation-changed` hooks across all existing `k8s` units to update cluster membership. In
+parallel, Kubernetes schedules new DaemonSet pods (MetalLB speaker + rawfile-CSI node) on the joining
+nodes. These DaemonSet pods take time to become `Running`, keeping `k8s/N` workload in `waiting` state
+throughout. If the per-join 1800s `juju wait-for model openstack-machines` deadline fires while
+cluster-relation-changed hooks are still executing and DaemonSet pods not yet Ready, the join exits 1.
+
+The nodes joined successfully — the failure is a **false negative**. Both `anonster` and `crustle` appear
+in the cluster list with their roles active. The model converges after the timeout fires.
+
+**How to confirm it's a false negative:**
+```bash
+# Check both failing nodes appear in cluster list with active roles:
+grep -E "anonster|crustle|<failing_nodes>" generated/sunbeam/sunbeam_cluster_list.txt
+
+# Verify k8s units are all active in final status:
+grep "k8s/" generated/sunbeam/juju_status_openstack-machines.txt | grep -v "active"
+# Expect no output if all k8s units are active
+
+# Check other joins completed:
+grep "Node joined cluster" /tmp/run_<id>_failed.log
+```
+
+**Distinguishing from cinder-volume/amqp variant:**
+- This variant: blocking unit is `k8s` (workload `waiting`, not `blocked`); message mentions `Unready Pods`; 1800s timeout; multiple nodes fail simultaneously
+- cinder-volume/amqp variant: blocking unit is `cinder-volume` (workload `blocked`); message is `(amqp) integration missing`; 1200s timeout; only one node fails
+
+**Timeline signature:**
+```
+17:22:17  Bootstrap started on ancientminister.maas
+17:58:50  Bootstrap completed (~36 min)
+17:58:55  All 6 non-bootstrap nodes begin prepare-node-script concurrently
+~18:00:33  All 6 join tokens generated; parallel joins dispatched
+18:03:03  cinder-volume app status reaches active
+18:31:46  k8s/0 starts executing cluster-relation-changed hook for k8s/2 (anonster joining)
+18:31:52  k8s/0 workload drops to waiting: Unready Pods (MetalLB + CSI not ready on new nodes)
+18:33:05  k8s/1 starts executing cluster-relation-changed hook for k8s/2
+18:33:16  anonster's 1800s wait expires → sunbeam cluster join exits 1 (stored in future)
+18:33:23  crustle's 1800s wait expires → sunbeam cluster join exits 1 (stored in future)
+18:41:32  chespin.maas joins (control; ~41 min total)
+18:55:44  another node joins (storage, compute)
+18:55:47  another node joins (compute)
+18:56:46  last node joins (storage); future.result() raises crustle's stored exception
+```
+
+**Snap/provider versions:**
+- `openstack` snap: channel `2024.1/beta`
+- `k8s` snap: `1.32/stable`
+- Juju: 3.6.21
+
+**Observed in:**
+- Run 25177679456 (UUID: a12c852e-66cb-4025-85a0-6c0a4c522977, tor3-sqa-testflinger cluster_1,
+  7 Pokémon-named testflinger nodes, anonster.maas roles control+storage and crustle.maas roles
+  control+compute both failing, main branch, 2026-04-30)
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes
@@ -684,3 +893,5 @@ _Add more patterns below as they are discovered._
 - **v1.7** (2026-04-08): Added "No cilium pod found" pattern — node name FQDN vs. short hostname mismatch; sunbeam-clusterd checks for Cilium pod by FQDN (`sunbeam/hostname` label) but k8s node is registered by short hostname; false negative; Cilium was 1/1 Running throughout; bootstrap exits in ~6 min; from run 24136117775 (UUID: 90f21456, tor3-sqa-shared_maas dh1_j9_1, openstack rev 985, k8s v1.32.11 rev 4754, 2026-04-08).
 - **v1.8** (2026-04-09): Added `juju wait-for` HA timeout pattern — `juju enable-ha` triggers full MAAS curtin deployment of HA controller machines from "Ready" state; 15-minute hard-coded timeout in `steps/juju.py` insufficient when slower machine needs ~10.5 min curtin + 3+ min post-reboot; from run 24193447734 (UUID: 13221a4e, tor3-sqa-dedicated_maas dh1_j2, openstack rev 987, MAAS 3.7.2, 2026-04-09).
 - **v1.9** (2026-04-14): Second occurrence of `juju wait-for` HA timeout — same cluster (dh1_j2), openstack rev 945 / 2024.1/stable; juju-3 took 12.3 min to deploy, leaving only 2m42s before timeout; from run 24397128547 (UUID: 6238d910, 2026-04-14).
+- **v2.0** (2026-05-04): Added `cinder-volume` install hook blocks on `(amqp) integration missing` during parallel joins — same mechanism as LP bug #2121929 (parallel joins cause Juju model churn; a unit on a concurrently-joining peer node runs its install hook for >20 min; behaim's 1200s internal wait expires; node is actually in the cluster and unit self-heals); from run 25179144394 (UUID: a1c69781, tor3-sqa-testflinger cluster_2, 2024.1/beta, 2026-04-30).
+- **v2.1** (2026-05-04): Added `k8s` cluster-relation-changed + MetalLB/CSI pods not ready variant of parallel join false failure — two nodes (anonster, crustle) fail simultaneously after 1800s wait; blocking condition is k8s cluster membership hooks running while DaemonSet pods for new nodes are not yet Ready; same false-failure outcome as v2.0 but different blocker and 1800s (not 1200s) timeout; from run 25177679456 (UUID: a12c852e, tor3-sqa-testflinger cluster_1, 2024.1/beta, 2026-04-30).
