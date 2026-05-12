@@ -293,12 +293,191 @@ selection but sync only produced `ubuntu/noble` images.
 
 ---
 
+### Pattern E: MongoDB primary election disrupts juju-wait and renders Juju API completely unreachable
+
+**Symptom (GitHub Actions and FCE log):**
+```
+ERROR:root:ERROR checking entity "user-admin" has permission:
+  while obtaining controller user: while obtaining controller user:
+  not master and slaveOk=false
+ERROR:root:juju status --format=json failed: 1
+Command 'juju-wait ... --retry_errors 0' returned non-zero exit status 1.
+```
+Then FCE's post-juju-wait status call:
+```
+ERROR no reachable servers
+subprocess.CalledProcessError: Command '['juju', 'status', '-m', 'magpie', '--format=tabular']'
+  returned non-zero exit status 1.
+```
+
+**Root cause:** The Juju HA controller's MongoDB replica set undergoes a primary election
+while `juju-wait` is actively polling. The election causes two cascading failures:
+1. juju-wait's internal permission check hits the "not master" error and exits immediately
+   (because `--retry_errors 0` disables all retries)
+2. The MongoDB election disrupts the Juju API (`jujud`) on all 3 HA controller VMs,
+   rendering port 17070 completely unreachable for ~5–6 minutes
+
+**Distinguishing from Pattern A:**
+
+| | Pattern A | Pattern E |
+|---|---|---|
+| Failure phase | `juju deploy` (write to MongoDB) | `juju-wait` (permission check read) |
+| Error message | `cannot add application: not master` | `not master` in permission check |
+| API after error | Still reachable | `no reachable servers` for ~5–6 min |
+| Trigger | mgo driver write during deploy | MongoDB primary election during wait |
+| Juju API recovery | N/A (deploy fails, FCE moves on) | Yes — controller self-recovers |
+
+**Timeline signature:**
+- All units still `allocating` when juju-wait starts (agents bootstrapping on fresh VMs)
+- juju-wait runs for only ~2 min before failing (vs 3600s timeout)
+- `juju status` hung ~96 s then returned `no reachable servers`
+- Version collector also sees `no reachable servers` / `connection is shut down` for 3–5 min
+- juju-crashdump collected successfully a few minutes later (controller recovered)
+- SSH tunnel healthy throughout (sshtest.txt shows no errors)
+
+**Evidence to look for:**
+- GitHub Actions log: `ERROR checking entity "user-admin" has permission: ... not master and slaveOk=false`
+- GitHub Actions log: subsequent `juju status` → `ERROR no reachable servers`
+- `generated/version_collector_magpie.log`: `juju models` → `ERROR no reachable servers` and `ERROR connection is shut down` within minutes of failure
+- `generated/sshtest.txt`: no SSH tunnel errors — the infra hosts are reachable, but the Juju API on the controller VMs is not
+
+**Retryable:** Yes. Transient Juju HA controller MongoDB election. Re-running is expected to succeed.
+
+**From run 25455244438 (UUID 965bc456-75e9-4792-8ba1-bba0f6ca0bd0, tor3-sqa-virtual_maas cluster_4, main, 2026-05-06):**
+
+juju-wait started at 23:35:41 with `--retry_errors 0`. All 30 units (5 apps × 6 machines)
+were in `allocating` state. At 23:38:03, juju-wait encountered the `not master` error and
+exited. Subsequent `juju status` returned `no reachable servers` (23:39:39), version
+collector saw the same at 23:40:47 and `connection is shut down` at 23:41:02. Controller
+recovered by 23:44:49 (crashdump collected). No snap auto-refreshes from controller VMs
+(10.241.144.81–83) found in Squid proxy log during the window.
+
+---
+
+### Pattern F: MAAS Temporal server deadlock during `deploy_maas_machines` → MAAS API hang → OAuth token expired (exit code 2)
+
+**Symptom (FCE magpie/log.txt):**
+```
+2026-05-07-15:15:04 root DEBUG [localhost]: maas root machine read demn38
+2026-05-07-15:27:59 root ERROR [localhost] Command failed: maas root machine read demn38
+2026-05-07-15:27:59 root ERROR 1[localhost] STDOUT follows:
+Authorization Error: 'Expired timestamp: given 1778166906 and now 1778167679,
+has a greater difference than threshold 300'
+subprocess.CalledProcessError: Command '['maas', 'root', 'machine', 'read', 'demn38']'
+returned non-zero exit status 2.
+```
+
+A `maas root machine read` call in the `wait_till_deployed` polling loop hangs for
+**12+ minutes** — far beyond the MAAS OAuth 300-second timestamp validity window. When MAAS
+finally processes the request, it rejects the expired OAuth token with exit code 2.
+
+**Distinguishing signals:**
+- Earlier polling cycles show progressive slowdown: reads that took 3–4s each degrade to
+  10–20s, then 38s–4m per node across successive cycles before the final hang
+- The hanging node is the **first** machine in the next polling cycle (not the last in the
+  previous cycle), so the OAuth token is generated fresh at the start of the hung call
+- Exit code is **2** (OAuth error from MAAS), not 1 (subprocess error). This distinguishes
+  it from network-level SSH errors (exit code 255)
+- No SSH tunnel errors in `sshtest.txt` — the runner can reach the infra nodes fine;
+  the hang is in the MAAS Temporal backend, not the SSH tunnel
+
+**Root cause chain:**
+
+1. **PostgreSQL serialization pressure:** Deploying 6 nodes simultaneously generates
+   concurrent writes to `maasserver_node` and `bmc/power-parameters` secrets from
+   multiple power-polling Temporal workflows. PostgreSQL emits `ERROR: could not serialize
+   access due to concurrent update` and `WARNING: canceling wait for synchronous replication
+   due to user request` (HA standby falling behind) from the onset of node deployment.
+
+2. **Temporal DB transaction timeouts:** The MAAS Temporal server's task queue managers
+   time out trying to begin DB transactions — `UpdateTaskQueue failed. Failed to start
+   transaction. Error: context deadline exceeded` — starting ~3 minutes into deployment
+   (15:03:17 in this run).
+
+3. **Temporal goroutine deadlock:** From ~4 minutes in, Temporal's internal goroutines
+   deadlock every ~30 seconds (`potential deadlock detected`). Temporal can no longer
+   dispatch workflow tasks.
+
+4. **Temporal shard loss:** ~7 minutes in, Temporal reports `shard status unknown` across
+   all task queues, becoming fully non-functional.
+
+5. **MAAS API hang:** Machine read API calls enter the MAAS request queue but the Temporal
+   backend cannot drive them to completion. The TCP connection stays open but no response
+   arrives for 12+ minutes.
+
+6. **OAuth expiry:** MAAS CLI generates an OAuth token at the moment `maas root machine read`
+   is invoked. After 773 seconds, MAAS rejects it as expired (threshold: 300s).
+
+**Key log correlation:**
+
+| Time (UTC) | Event |
+|---|---|
+| 15:00 | Six magpie nodes added; deployment starts |
+| 15:00:17 | First PostgreSQL serialization error (`bmc/power-parameters`) |
+| 15:01:32 | HA replication cancellation (standby overloaded) |
+| 15:03:17 | First Temporal DB transaction timeout (`mnc73y@agent:main/3`) |
+| 15:04:50–15:05:20 | FCE poll cycle: individual reads taking 14–20s (was 4s) |
+| 15:06:00–15:14:34 | FCE poll cycle: reads take 15s–4m09s each |
+| 15:07:13 | Temporal: "potential deadlock detected" (repeats every ~30s) |
+| 15:10:47 | Temporal: "shard status unknown" — fully non-functional |
+| 15:15:04 | FCE starts `maas root machine read demn38` — hangs |
+| 15:27:59 | MAAS returns OAuth expiry error (exit code 2) |
+
+**Grep to confirm:**
+```bash
+# Temporal errors in MAAS syslog
+grep -h "maas-temporal" <work_dir>/maas-logs/*/var/log/syslog | python3 -c "
+import sys,json,re
+for l in sys.stdin:
+  m=re.search(r'\{.*\}',l)
+  if m:
+    try:
+      d=json.loads(m.group())
+      if d.get('level')=='error': print(d.get('ts'), d.get('msg'), d.get('error','')[:80])
+    except: pass
+"
+
+# PostgreSQL serialization errors
+grep "could not serialize\|synchronous replication" \
+  <work_dir>/maas-logs/*/var/log/postgresql/postgresql-*-ha.log
+```
+
+**Retryable:** Yes. This is a transient infrastructure overload condition. The MAAS Temporal
+server self-recovers once the deployment pressure subsides; re-running the pipeline is
+expected to succeed. However, recurrence is possible if deploying ≥6 nodes simultaneously
+on this substrate.
+
+**From run 25492917651 (UUID 35f56c6f-264f-47ae-aafd-3b679723f4ff, tor3-sqa-virtual_maas
+cluster_6, MAAS 3.5.12-16413-g.7fb94f378, main, 2026-05-07):**
+
+Six magpie nodes (node1–6) deployed concurrently. PostgreSQL serialization errors started
+at 15:00:17. Temporal deadlock from 15:07:13. FCE's `maas root machine read demn38` hung
+for 773 seconds (15:15:04–15:27:59). OAuth threshold: 300s; actual elapsed: 773s. Exit
+code 2. Juju controller status at end: `controller/0` and `controller/1` in `error/lost`
+state (consistent with infra node overload affecting KVM-hosted VMs on the same hosts).
+
+**Second occurrence — run 25442241821 (UUID 4ec765e5-3cbb-4b2c-92f0-f712e63585fb,
+tor3-sqa-virtual_maas cluster_1, MAAS 3.5.12-16413-g.7fb94f378, main, 2026-05-06):**
+
+Six magpie nodes (node1–6, system IDs wfxywm/g3xkde/pgf3dp/mxa7bx/pxcq6x/cpbfba) deployed
+concurrently. A burst of 71 Curtin status callbacks from `pxcq6x` at 16:58 (15+ POSTs in
+2 seconds) preceded progressively degrading machine-read response times: `mxa7bx` 91s,
+`wfxywm` 93s, then `g3xkde` hung for **663 seconds** (17:00:19–17:11:23). OAuth threshold:
+300s; actual elapsed: 663s. Exit code 2. The full MAAS Temporal/PostgreSQL syslog was not
+available (infra2 syslog sparse during that window; infra1/3 syslog absent), so direct
+Temporal deadlock evidence is not confirmed in logs — but the escalating response-time pattern
+and matching MAAS version/substrate are consistent with the same mechanism. All 6 nodes
+remained `Deploying` at failure; no hardware errors.
+
+---
+
 ## Notes
 
 - Deploys are issued sequentially per network space; any space can be the one that fails
 - The Juju controller HA nodes' internal logs are not available in Swift artifacts
-- `temporal-server` errors seen in MAAS infra syslog around the same time are unrelated
-  background noise from the infra node services
+- `temporal-server` errors in MAAS infra syslog can be either background noise **or** the
+  root cause of machine-read hangs (Pattern F). Check whether the errors correlate with
+  FCE polling slowdowns and whether a DB transaction timeout cascade follows.
 - For `dedicated_maas`, the MAAS logs bundle may contain only binary systemd journal files
   (no `/var/log/syslog`); if the journal is truncated, lower-level ephemeral failure details
   may not be determinable from available artifacts
@@ -312,3 +491,6 @@ selection but sync only produced `ubuntu/noble` images.
   FCE timeout; no curtin_config for failing node; MAAS journal truncated; from run
   24111787100 (UUID b881ccd8, tor3-sqa-dedicated_maas dh1_j2, main, 2026-04-08).
 - **v1.3** (2026-04-08): Added Pattern D — all 4 nodes remain `Ready` throughout (never `Deploying`); Juju provisioner receives `400 Bad Request: 'jammy' is not a valid distro_series` from MAAS deploy API; MAAS boot source had Jammy selection but sync only produced Noble images; not retryable without importing Jammy image first; from run 24120449876 (UUID 00a49a3b, tor3-sqa-virtual_maas, main, 2026-04-08, SKU master-magpie-snap-jammy-mixed).
+- **v1.4** (2026-05-06): Added Pattern E — MongoDB primary election disrupts juju-wait and renders Juju API completely unreachable for ~5–6 min; more severe than Pattern A (write failure only); juju-wait exits immediately due to `--retry_errors 0`; subsequent `juju status` returns `no reachable servers`; version collector confirms outage via `connection is shut down`; controller self-recovers (crashdump collected); from run 25455244438 (UUID 965bc456, tor3-sqa-virtual_maas cluster_4, main, 2026-05-06).
+- **v1.5** (2026-05-07): Added Pattern F — MAAS Temporal server deadlock during `deploy_maas_machines` polling; PostgreSQL serialization pressure from 6 concurrent deployments → Temporal DB timeouts → goroutine deadlock → shard loss → 12+ min MAAS API hang → OAuth token expiry (exit code 2, "Expired timestamp"); updated Notes to clarify that Temporal errors CAN be the root cause (not always background noise); from run 25492917651 (UUID 35f56c6f, tor3-sqa-virtual_maas cluster_6, MAAS 3.5.12, main, 2026-05-07).
+- **v1.6** (2026-05-06): Added second confirmed occurrence of Pattern F — UUID 4ec765e5 (cluster_1, run 25442241821); 663s hang on `g3xkde` (vs 773s in first occurrence); Temporal/PostgreSQL syslog not available but escalating read times (91s → 93s → 663s) match the same mechanism; MAAS HTTP access log on infra1 confirms the request arrived at nginx at 17:11:23 and returned 401, with no access log entry for the 663-second queuing period.

@@ -741,6 +741,104 @@ dh1_j2, MAAS 3.7.2-17972-g.35e297c4d / snap rev 41649, machine `duosion`, BMC 10
 
 ---
 
+### Pattern L: Mirror catalog lists new image set (20260430) but files are absent → Temporal `download-bootresourcefile` HTTP 404 → `is_importing` stuck → FCE `wait_for_not_boot_resource_importing` timeout
+
+**Symptom (FCE maas/log.txt):**
+```
+2026-05-08-09:38:33 root DEBUG [localhost]: maas root boot-resources is-importing
+2026-05-08-09:38:36 root INFO Boot resources still importing, sleeping 30 seconds.
+… (repeats every ~30s for ~27 minutes) …
+Exception: Timed out waiting for regions to import images.
+##[error]Process completed with exit code 1.
+```
+
+The failure occurs in FCE's `maas:configure_maas` → `_sync_images()` → `wait_for_not_boot_resource_importing()`.
+No node enlists; `machines create` is never reached. This is distinct from Pattern F (where the mirror
+is unreachable and `machines create` fails with an empty architecture list) and Pattern G (where nodes
+enlist but commissioning fails).
+
+**Root cause:** The internal image mirror (`http://10.141.186.167/maas/images/ephemeral-v3/stable/`) had
+updated its **catalog index** to list a new image set (datestamp `20260430` for jammy/amd64) before the
+actual image files were synced to the mirror. When MAAS's Temporal engine dispatched
+`download-bootresource` child workflows to fetch the files, every attempt returned **HTTP 404**:
+
+```
+temporalio.exceptions.ApplicationError: ClientResponseError: 404, message='Not Found',
+url=URL('http://10.141.186.167/maas/images/ephemeral-v3/stable/jammy/amd64/20260430/ga-22.04/generic/boot-initrd')
+```
+
+MAAS's Temporal retry policy re-attempted each workflow indefinitely. The `is_importing` API endpoint
+returns `true` as long as any `bootresource-download` workflow is active. Since all 13 download
+workflows were stuck in the retry loop (reach attempt 38+ over ~27 min), `is_importing` never cleared.
+FCE's 30-minute poll timeout then fired.
+
+**13 distinct 404 URLs observed (all `jammy/amd64/20260430/<kernel>/<flavor>/<file>`):**
+- `ga-22.04/generic/boot-initrd`, `ga-22.04/generic/boot-kernel`
+- `ga-22.04/lowlatency/boot-initrd`, `ga-22.04/lowlatency/boot-kernel`
+- `hwe-22.04/generic/boot-initrd`, `hwe-22.04/generic/boot-kernel`
+- `hwe-22.04/lowlatency/boot-initrd`, `hwe-22.04/lowlatency/boot-kernel`
+- `hwe-22.04-edge/generic/boot-initrd`, `hwe-22.04-edge/generic/boot-kernel`
+- `hwe-22.04-edge/lowlatency/boot-initrd`, `hwe-22.04-edge/lowlatency/boot-kernel`
+- `squashfs`
+
+**Key distinguishing evidence:**
+
+```bash
+# Temporal download-bootresourcefile failures in syslog
+grep "download-bootresourcefile.*Completing activity as failed" \
+  <work_dir>/maas-logs/10.241.144.2/var/log/syslog | head -10
+# Expect: attempt=1 failures at ~09:35; same workflows at attempt=N by 10:00
+
+# 404 URLs confirming incomplete mirror sync
+grep "404, message='Not Found'" \
+  <work_dir>/maas-logs/10.241.144.2/var/log/syslog \
+  | grep -oP "url=URL\('\S+'\)" | sort -u
+# All URLs follow the pattern: /stable/jammy/amd64/<datestamp>/<kernel>/<flavor>/<file>
+
+# Confirm import WAS triggered and catalog WAS fetched (not Pattern F)
+grep "Importing images from source\|Started importing of boot images" \
+  <work_dir>/maas-logs/10.241.144.2/var/log/syslog | head -5
+
+# Count Temporal shard errors (startup churn, not the root cause)
+grep -c "Failed to lock shard" <work_dir>/maas-logs/10.241.144.2/var/log/syslog
+```
+
+**Distinguishing from related patterns:**
+
+| | Pattern L (this) | Pattern F | Pattern G |
+|---|---|---|---|
+| Mirror reachable? | ✅ Yes (catalog fetched) | ❌ No (`Errno 113`) | ✅ Yes |
+| Image files present? | ❌ No (HTTP 404) | ❌ N/A | ⚠️ Partial (noble squashfs deleted) |
+| `is_importing` | Stuck true indefinitely | Clears quickly → false positive | Clears after import |
+| FCE failure point | `wait_for_not_boot_resource_importing` timeout | `machines create` (empty arch) | `_wait_for_deployed` (commissioning FAIL) |
+| `machines create` | Never reached | Fails with empty architecture list | Succeeds (arch valid) |
+| Error message | `Timed out waiting for regions to import images` | `'amd64/generic' is not a valid architecture` | `Missing boot image ubuntu/amd64/no-such-kernel/noble` |
+
+**Timing from run 25545041966 (UUID 6db10053-3c89-4fa5-a875-46373eb3fc0e, tor3-sqa-virtual_maas cluster_2,
+MAAS 3.5.12-16413-g.7fb94f378, snap rev 41917, branch main, 2026-05-08):**
+```
+09:17:57 – systemd reload + Corosync/Pacemaker start (MAAS snap rev 41917 install completes)
+09:18:03 – Pacemaker starts with empty CIB (pgsql resource permanently blocked — benign for MAAS 3.5)
+09:24:55 – MAAS pebble starts regiond + rackd (snap rev 41917); HTTP serving begins
+09:31:34 – FCE POST boot-resources op=import → MAAS starts catalog download from 10.141.186.167
+09:31:35 – MAAS schedules 13 bootresourcefile downloads for jammy/amd64/20260430 images
+09:35:38 – First download-bootresourcefile failures: HTTP 404 (attempt=1) for all 13 files
+09:38:33 – FCE begins polling is_importing (already stuck=true from the Temporal retry loops)
+10:00:01 – workflow bootresource-download:upstream:99e93312233c reaches attempt=38 (still failing)
+10:01:07 – FCE raises: Exception: Timed out waiting for regions to import images.
+```
+
+**Note on Pacemaker/PostgreSQL errors:** All three infra nodes showed Pacemaker starting with an empty
+CIB at 09:18, leading to pgsql being permanently blocked. This is a separate issue: MAAS 3.5 (snap rev
+41917) manages its own Pebble-managed PostgreSQL, independent of Pacemaker. The Pacemaker failure did
+**not** affect MAAS operations in this run.
+
+**Recovery:** Retry the pipeline. If the mirror completes its sync of the 20260430 image set before the
+next run, the downloads will succeed. If the mirror consistently serves an incomplete 20260430 set,
+escalate to the team managing the internal mirror.
+
+---
+
 ## Notes
 
 - This step is only executed on `virtual_maas` and `dedicated_maas` substrates; it is
@@ -751,6 +849,51 @@ dh1_j2, MAAS 3.7.2-17972-g.35e297c4d / snap rev 41649, machine `duosion`, BMC 10
   useful consolidated syslog via the `maas-log` relay daemon.
 - Node system IDs (e.g. `8knrhr`, `nkbr6q`) appear in MAAS API calls; map them to
   hostnames via `maas.api: [info] Request from user root to acquire machine: node<N>…` entries.
+
+### Pattern K: HAProxy restart on infra2 drops in-flight `vm-host refresh` → "Remote end closed connection without response"
+
+**Symptom (GitHub Actions log):**
+```
+subprocess.CalledProcessError: Command '['maas', 'root', 'vm-host', 'refresh', '2']'
+returned non-zero exit status 2.
+
+STDERR:
+  Remote end closed connection without response
+```
+
+Preceded by successful `vm-host refresh 1` (infra1). The step is `maas:setup_infra_kvm`.
+`maas-rack support-dump --networking` also fails on infra2 (exit 64) during log collection.
+
+**Root cause:** HAProxy on infra2 (the second infra node) is restarted (graceful SIGTERM
+to worker, exit code 143) at the exact moment `maas root vm-host refresh 2` is in progress.
+This drops the TCP connection to the MAAS API VIP (`10.241.144.5:80`), causing the MAAS CLI
+to return exit code 2 with "Remote end closed connection without response". FCE's
+`refresh_vmhost()` has no retry logic — any network-level failure is immediately fatal.
+
+**Timeline (this occurrence):**
+- 05:47:07 — `maas root vm-hosts create type=lxd name=infra2 power_address=10.241.144.3 zone=zone2`
+- 05:47:28 — `maas root vm-host refresh 2` started
+- 05:48:11 — HAProxy on infra2 restarted (per `var/log/haproxy.log` on 10.241.144.3)
+- 05:48:12 — `maas root vm-host refresh 2` failed
+
+**HAProxy restart trigger:** Pacemaker manages haproxy as a cloned resource
+(`crm configure clone haproxy-clone haproxy` with 15s monitor interval, configured by FCE
+at ~05:42:34). The exact trigger for the 05:48:11 restart is not determinable without
+syslog (not present in this archive), but likely candidates are:
+- MAAS region/agent triggering a haproxy config reload as part of zone2 rack-controller
+  registration or vm-host creation processing.
+- Pacemaker resource event during vm-host registration.
+
+**Diagnostic grep:**
+```bash
+grep "05:48\|05:47" /path/to/c9e24a7e-maas-logs/10.241.144.3/var/log/haproxy.log
+# Expect: haproxy master exit + new worker fork at 05:48:11
+```
+
+**From run:** 25417149963 (UUID c9e24a7e-3390-4ded-b4fc-374cc8e42910,
+tor3-sqa-virtual_maas cluster_2, MAAS 3.5/beta rev 41917, branch main, 2026-05-06).
+
+---
 
 ## Version History
 
@@ -769,4 +912,5 @@ dh1_j2, MAAS 3.7.2-17972-g.35e297c4d / snap rev 41649, machine `duosion`, BMC 10
 - **v1.9** (2026-04-08): Added Pattern H — `install_kvm=True` deploy: cloud-init receives vendor-data (1101 bytes, HTTP 200) but performs zero package downloads; libvirt never installed; no 2nd netboot-finished; 30-min FCE timeout. AppArmor virsh/pkttyagent denials confirmed NOT the cause (present in passing runs too). Likely MAAS 3.6.4 race condition where `install_kvm` DB flag not reflected at vendor-data generation time. From run 24117574587 (UUID 3830828c, tor3-sqa-virtual_maas cluster_4, node5=tgdgmm, snap rev 41799, 2026-04-08).
 - **v1.10** (2026-04-08): Added Pattern I — `install_kvm=True` deploy: Ubuntu never boots after successful curtin installation; complete network silence post-iPXE local-boot; 30s DHCP lease not renewed; cross-disk grub layout (grub_device on SCSI-2, /boot on SCSI-0) unlike working runs where grub+boot share the same disk; exact failure mode unconfirmable without KVM host serial console; from run 24120446627 (UUID 1078296e, tor3-sqa-virtual_maas cluster_2, node5=bsg8t7, snap rev 41799, 2026-04-08).
 - **v1.11** (2026-04-10): Clarified Pattern A substrate reliability. Analysis of 12 reports mentioning AppArmor/pkttyagent showed: Pattern A is a genuine root cause on dedicated_maas (confirmed in 5dd2bf63, fde2213c), but on virtual_maas the same denials appear in ALL runs including passing ones (144+ occurrences/run) and are routinely a red herring. Multiple virtual_maas failure analyses (1078296e, 3830828c, 8e226262, 473c2885) explicitly confirmed AppArmor denials as benign with a different actual root cause. Do not conclude Pattern A on virtual_maas from denials alone.
-- **v1.12** (2026-04-14): Added Pattern J — `machines create` hangs 15 minutes → nginx 499 → OAuth expired 401: MAAS 3.7.x blocks HTTP response on Temporal `PowerOnWorkflow` (IPMI commissioning power-on); BMC at 10.240.21.47 (`duosion`) unresponsive; httplib2 900s timeout fires; OAuth token 901s old (>300s threshold) → 401 on retry; from run 24420487838 (UUID 6400c87a, tor3-sqa-dedicated_maas dh1_j2, MAAS 3.7.2/snap rev 41649, 2026-04-14).
+- **v1.13** (2026-05-06): Added Pattern K — HAProxy on infra2 restarted (SIGTERM, exit 143) at 05:48:11 UTC, dropping in-flight `vm-host refresh 2` API connection; MAAS CLI returns exit code 2 with "Remote end closed connection without response"; FCE has no retry for `refresh_vmhost()`; pacemaker managing haproxy-clone; syslog absent so exact trigger unconfirmable; from run 25417149963 (UUID c9e24a7e, tor3-sqa-virtual_maas cluster_2, MAAS 3.5/beta rev 41917, 2026-05-06).
+- **v1.14** (2026-05-08): Added Pattern L — internal mirror catalog lists 20260430 jammy/amd64 images but 13 individual files return HTTP 404; MAAS Temporal `download-bootresource` workflows retry indefinitely (reach attempt 38+ in 27 min); `is_importing` stuck true; FCE `wait_for_not_boot_resource_importing` times out; from run 25545041966 (UUID 6db10053, tor3-sqa-virtual_maas cluster_2, MAAS 3.5.12 snap rev 41917, 2026-05-08). Distinct from Pattern F (mirror unreachable) and G (incomplete catalog deletes noble image).
