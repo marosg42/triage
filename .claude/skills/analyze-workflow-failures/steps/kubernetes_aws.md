@@ -80,7 +80,7 @@ grep "EntityAlreadyExists\|create-role\|CreateRole" \
 
 ## Known Failure Patterns
 
-### Pattern A: Stale IAM role causes EntityAlreadyExists — aws-integrator permanently blocked
+### Pattern 1: Stale IAM role causes EntityAlreadyExists — aws-integrator permanently blocked
 
 **Symptom (in GitHub Actions log, ~60 min after step starts):**
 ```
@@ -155,6 +155,15 @@ Check whether `aws-nuke` or Terraform cleanup covers IAM roles matching `charm.a
     event at 07:19:21 triggered re-creation attempt → EntityAlreadyExists at 07:19:30
   - No TagLimitExceeded in this run; 11 retries from 07:19:30 to 08:15:49; juju-wait timeout at 08:17:54
   - aws-integrator: latest/beta rev 75 (26ad2b4)
+- Run 26070574226 (UUID: 81d842aa-ca96-4860-9017-a0828575de33, ext-sqa-aws useast1, 2026-05-19)
+  - **IAM propagation sub-variant:** role created (01:56:09Z), instance-profile created (01:56:10Z),
+    role attached to profile (01:56:11Z); `AssociateIamInstanceProfile` → `InvalidParameterValue:
+    Invalid IAM Instance Profile name` 1s after profile creation (EC2 not yet seen the new profile)
+  - charm → `blocked` at 01:56:12Z; 17 EntityAlreadyExists retries (01:57:22Z → 02:51Z); juju-wait
+    timeout at 02:54:58Z (exit code 44)
+  - No TagLimitExceeded; no cross-run stale state (fresh model UUID 9ea5f188)
+  - `_retry_for_entity_delay` does NOT catch `InvalidParameterValue`, only `NoSuchEntity`-type errors
+  - aws-integrator: latest/beta rev 75
 
 ---
 
@@ -181,3 +190,7 @@ _Add more patterns below as they are discovered._
 - **v1.1** (2026-04-08): Extended Pattern A to cover same-run intra-run re-trigger (not only
   cross-run stale role). Confirmed via run 24122087737 (UUID c46a2ec4, useast1): fresh model,
   role created at 07:14:49, re-creation triggered at 07:19:21 by second aws-relation-changed event.
+- **v1.2** (2026-05-19): Added IAM propagation sub-variant to Pattern A (run 26070574226, UUID
+  81d842aa): `AssociateIamInstanceProfile` fails with `InvalidParameterValue` 1s after instance
+  profile creation (EC2 propagation lag); `_retry_for_entity_delay` only catches `NoSuchEntity`,
+  not `InvalidParameterValue`; leaves orphaned role; 17 EntityAlreadyExists retries until timeout.

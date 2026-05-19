@@ -39,7 +39,10 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── sunbeam_launch_vm.md                               ← per-step logs, patterns, grep hints
 │   ├── deploy_charm_mysql.md                           ← per-step logs, patterns, grep hints
 │   ├── openstack.md                                    ← per-step logs, patterns, grep hints
-│   └── test_kubeflow.md                               ← per-step logs, patterns, grep hints
+│   ├── test_kubeflow.md                               ← per-step logs, patterns, grep hints
+│   ├── kubernetes-maas.md                             ← per-step logs, patterns, grep hints
+│   ├── kubernetes_aws.md                              ← per-step logs, patterns, grep hints
+│   └── sunbeam_enable_plugins_all.md                  ← per-step logs, patterns, grep hints
 └── patterns/
     └── maas-snap-apparmor-dbupgrade.md  ← deep-dive on specific recurring bug
 ```

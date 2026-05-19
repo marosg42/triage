@@ -99,7 +99,7 @@ grep -i "timeout\|reachable\|ping\|ssh" ${DIR}/validation_smoke_*.log | grep -i 
 
 ## Known Failure Patterns
 
-### Pattern A: Floating IP / VM Public Network Unreachable
+### Pattern 1: Floating IP / VM Public Network Unreachable
 
 **Symptom:**
 ```
@@ -172,9 +172,9 @@ Two known-benign patterns (confirmed in run bf85bf5d):
    OVN's periodic reconciliation recovers. Watch the LRP IDs — if they match the failing
    test's own router port, that would be significant; if they're from other test workers, not.
 
-### Pattern B: Cilium `br+` Device Pattern Intercepts OVN `br-ex` (Beta Channel Regression)
+### Pattern 2: Cilium `br+` Device Pattern Intercepts OVN `br-ex` (Beta Channel Regression)
 
-**Symptom:** Identical to Pattern A (floating IP unreachable, quick passes, smoke fails)
+**Symptom:** Identical to Pattern 1 (floating IP unreachable, quick passes, smoke fails)
 but specifically on `2024.1/beta` deployments. `2024.1/stable` runs of the same test pass.
 
 **Root cause:** Cilium is deployed with `--devices='br+,bond+,eth+,...'` in the beta
@@ -224,11 +224,11 @@ Cilium ignores `br-ex` entirely; OVN north-south traffic flows through uninterce
 **Fix:** Remove `br+` from Cilium's `--devices` configuration, or add explicit exclusions
 for OVS bridge interfaces (`br-ex`, `br-int`) using Cilium's `--devices-exclude` option.
 
-### Pattern C: Cilium `cil_from_netdev` on physnet1 NIC after Policy Update (edge/cilium Channel)
+### Pattern 3: Cilium `cil_from_netdev` on physnet1 NIC after Policy Update (edge/cilium Channel)
 
-**Symptom:** Identical to Pattern A/B (floating IP unreachable, quick passes, smoke fails)
+**Symptom:** Identical to Pattern 1/2 (floating IP unreachable, quick passes, smoke fails)
 but on `2024.1/edge/cilium` with the `!br-ex` exclusion fix already applied. The Cilium fix
-from Pattern B is confirmed working; this is a different failure mechanism.
+from Pattern 2 is confirmed working; this is a different failure mechanism.
 
 **Key distinguishing feature:** One VM created BEFORE `sunbeam enable validation` (i.e. before
 the Tempest K8s pod is scheduled) CAN be reached via its floating IP. All VMs created AFTER

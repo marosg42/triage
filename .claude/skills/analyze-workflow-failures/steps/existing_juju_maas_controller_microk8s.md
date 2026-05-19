@@ -45,7 +45,7 @@ grep -E "error|blocked|waiting|maintenance" \
 
 ## Known Failure Patterns
 
-### Pattern: MicroK8s dqlite "database is locked" during juju add-k8s
+### Pattern 1: MicroK8s dqlite "database is locked" during juju add-k8s
 
 **Symptom:**
 ```

@@ -51,7 +51,7 @@ grep "2026-<date>T<HH>:" /tmp/maas-logs-*/*/var/log/syslog \
 
 ## Known Failure Patterns
 
-### Pattern A: Juju controller MongoDB "not master and slaveOk=false"
+### Pattern 1: Juju controller MongoDB "not master and slaveOk=false"
 
 **Symptom:**
 ```
@@ -88,7 +88,7 @@ typically succeeds.
 
 ---
 
-### Pattern B: Physical node stuck in "Failed deployment: Loading ephemeral" → 30-minute timeout
+### Pattern 2: Physical node stuck in "Failed deployment: Loading ephemeral" → 30-minute timeout
 
 **Symptom (FCE magpie/log.txt and GitHub Actions log):**
 ```
@@ -162,7 +162,7 @@ MAAS journal (10.241.128.4) was truncated; lower-level cause not determinable.
 
 ---
 
-### Pattern C: All nodes stuck in `Deploying` — slow simultaneous OS installation exceeds 30-min timeout
+### Pattern 3: All nodes stuck in `Deploying` — slow simultaneous OS installation exceeds 30-min timeout
 
 **Symptom (FCE magpie/log.txt and GitHub Actions log):**
 ```
@@ -229,7 +229,7 @@ at 01:57:56 (~28 min; netboot off). node1/2 were still in Curtin at 02:00:37 (af
 
 ---
 
-### Pattern D: All nodes stay `Ready` — MAAS rejects deploy with 400 (distro_series not available)
+### Pattern 4: All nodes stay `Ready` — MAAS rejects deploy with 400 (distro_series not available)
 
 **Symptom (FCE magpie/log.txt):**
 ```
@@ -293,7 +293,7 @@ selection but sync only produced `ubuntu/noble` images.
 
 ---
 
-### Pattern E: MongoDB primary election disrupts juju-wait and renders Juju API completely unreachable
+### Pattern 5: MongoDB primary election disrupts juju-wait and renders Juju API completely unreachable
 
 **Symptom (GitHub Actions and FCE log):**
 ```
@@ -354,7 +354,7 @@ recovered by 23:44:49 (crashdump collected). No snap auto-refreshes from control
 
 ---
 
-### Pattern F: MAAS Temporal server deadlock during `deploy_maas_machines` → MAAS API hang → OAuth token expired (exit code 2)
+### Pattern 6: MAAS Temporal server deadlock during `deploy_maas_machines` → MAAS API hang → OAuth token expired (exit code 2)
 
 **Symptom (FCE magpie/log.txt):**
 ```

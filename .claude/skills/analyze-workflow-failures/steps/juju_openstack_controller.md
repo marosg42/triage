@@ -44,7 +44,7 @@ grep -n "juju bind\|not in space\|enable_ha" /tmp/run_<run_id>_failed.log
 
 ## Known Failure Patterns
 
-### Pattern: Controller unit not in expected Juju space (enable_ha bind fails)
+### Pattern 1: Controller unit not in expected Juju space (enable_ha bind fails)
 
 **Symptom:**
 ```
@@ -95,7 +95,7 @@ run. Retrying usually succeeds.
 
 ---
 
-### Pattern B: Nova MessagingTimeout — bootstrap VM stuck in BUILD
+### Pattern 2: Nova MessagingTimeout — bootstrap VM stuck in BUILD
 
 **Symptom:**
 ```

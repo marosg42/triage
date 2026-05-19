@@ -58,7 +58,7 @@ grep "maas-machine.*\[node[0-9]\].*cloud-config\|cloud-init.*finished" /tmp/maas
 
 ## Known Failure Patterns
 
-### Pattern: AppArmor virsh denial blocks KVM host registration → nodes stuck in Deploying
+### Pattern 1: AppArmor virsh denial blocks KVM host registration → nodes stuck in Deploying
 
 **Symptom (GitHub Actions log):**
 ```
@@ -111,7 +111,7 @@ In multiple virtual_maas failure analyses (1078296e, 3830828c, 8e226262, 473c288
 
 ---
 
-### Pattern B: MAAS BMC deduplication causes self-deletion → `taillow` stuck in `unknown`
+### Pattern 2: MAAS BMC deduplication causes self-deletion → `taillow` stuck in `unknown`
 
 **Symptom (GitHub Actions log):**
 ```
@@ -172,7 +172,7 @@ so the old IDs stored in FCE's initial read were different from the new IDs retu
 
 ---
 
-### Pattern C: Curtin `install_kernel` fails — `apt-get update` makes no network requests → `linux-generic` unfindable
+### Pattern 3: Curtin `install_kernel` fails — `apt-get update` makes no network requests → `linux-generic` unfindable
 
 **Symptom (GitHub Actions log):**
 ```
@@ -241,7 +241,7 @@ Second confirmed occurrence: run 23936994907 (UUID 72dc244a, tor3-sqa-virtual_ma
 
 ---
 
-### Pattern D: Curtin `installing-missing-packages` fails — EFI boot packages unfindable → Temporal retries exhaust FCE timeout
+### Pattern 4: Curtin `installing-missing-packages` fails — EFI boot packages unfindable → Temporal retries exhaust FCE timeout
 
 **Symptom (GitHub Actions log):**
 ```
@@ -304,7 +304,7 @@ grep "\[suicune\].*cloud-init\[1532\].*Reading package lists\|Installing package
 
 ---
 
-### Pattern E: Ubuntu security mirror package replacement race → `python3-django` 404 → `maas-region-controller` install fails
+### Pattern 5: Ubuntu security mirror package replacement race → `python3-django` 404 → `maas-region-controller` install fails
 
 **Symptom (GitHub Actions log):**
 ```
@@ -357,7 +357,7 @@ with the new package version. No infrastructure change is required.
 
 ---
 
-### Pattern F: Boot resource import fails (internal mirror unreachable) → `machines create` rejected with empty architecture list
+### Pattern 6: Boot resource import fails (internal mirror unreachable) → `machines create` rejected with empty architecture list
 
 **Symptom (GitHub Actions log):**
 ```
@@ -448,7 +448,7 @@ instead.
 
 ---
 
-### Pattern G: Internal boot source mirror provides incomplete catalog → noble commissioning image deleted → all nodes immediately `FAILED_COMMISSIONING`
+### Pattern 7: Internal boot source mirror provides incomplete catalog → noble commissioning image deleted → all nodes immediately `FAILED_COMMISSIONING`
 
 **Symptom (GitHub Actions log):**
 ```
@@ -533,7 +533,7 @@ snap rev 41799, ADDON `maas_snap_nehjoshi5_maas-3.6-next`, features: `maas_boot_
 
 ---
 
-### Pattern H: `install_kvm=True` deploy — cloud-init receives vendor-data but does not install libvirt → no 2nd netboot-finished → node stuck in Deploying
+### Pattern 8: `install_kvm=True` deploy — cloud-init receives vendor-data but does not install libvirt → no 2nd netboot-finished → node stuck in Deploying
 
 **Symptom:** Node deployed with `install_kvm=True` transitions through curtin successfully
 (1st `netboot-finished` received) but never reaches Deployed. Cloud-init runs, fetches
@@ -593,7 +593,7 @@ cluster_4, node5=tgdgmm, MAAS snap rev 41799, 2026-04-08)
 
 ---
 
-### Pattern I: `install_kvm=True` deploy — Ubuntu never boots after curtin (cross-disk grub layout) → complete network silence → stuck in Deploying
+### Pattern 9: `install_kvm=True` deploy — Ubuntu never boots after curtin (cross-disk grub layout) → complete network silence → stuck in Deploying
 
 **Symptom:** Node deployed with `install_kvm=True`. Curtin completes and sends final status
 POST (1st `netboot-finished` received). iPXE fetches local-boot config (299 bytes). After that:
@@ -657,7 +657,7 @@ cluster_2, node5=bsg8t7, MAAS snap rev 41799, 2026-04-08)
 
 ---
 
-### Pattern J: `machines create` hangs 15 minutes → nginx 499 → OAuth expired 401 (dedicated_maas, MAAS 3.7.x)
+### Pattern 10: `machines create` hangs 15 minutes → nginx 499 → OAuth expired 401 (dedicated_maas, MAAS 3.7.x)
 
 **Symptom:** FCE `maas:enlist_nodes` calls `maas root machines create hostname=<node>` and
 waits ~15 minutes before receiving an error. The error looks like an OAuth expiry, not a
@@ -741,7 +741,7 @@ dh1_j2, MAAS 3.7.2-17972-g.35e297c4d / snap rev 41649, machine `duosion`, BMC 10
 
 ---
 
-### Pattern L: Mirror catalog lists new image set (20260430) but files are absent → Temporal `download-bootresourcefile` HTTP 404 → `is_importing` stuck → FCE `wait_for_not_boot_resource_importing` timeout
+### Pattern 11: Mirror catalog lists new image set (20260430) but files are absent → Temporal `download-bootresourcefile` HTTP 404 → `is_importing` stuck → FCE `wait_for_not_boot_resource_importing` timeout
 
 **Symptom (FCE maas/log.txt):**
 ```
@@ -850,7 +850,7 @@ escalate to the team managing the internal mirror.
 - Node system IDs (e.g. `8knrhr`, `nkbr6q`) appear in MAAS API calls; map them to
   hostnames via `maas.api: [info] Request from user root to acquire machine: node<N>…` entries.
 
-### Pattern K: HAProxy restart on infra2 drops in-flight `vm-host refresh` → "Remote end closed connection without response"
+### Pattern 12: HAProxy restart on infra2 drops in-flight `vm-host refresh` → "Remote end closed connection without response"
 
 **Symptom (GitHub Actions log):**
 ```

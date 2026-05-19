@@ -56,7 +56,7 @@ grep -a "<machine-ip>" <maas-logs>/10.*/var/log/syslog | grep "squid\|maas-http"
 
 ## Known Failure Patterns
 
-### Pattern A: Juju machine agent `down` — unit succeeds but machine stays down (Juju 4.0.x)
+### Pattern 1: Juju machine agent `down` — unit succeeds but machine stays down (Juju 4.0.x)
 
 **Symptom (GitHub Actions log):**
 ```

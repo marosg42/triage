@@ -41,7 +41,7 @@ grep "current_kubernetes_version\|cluster-\|Creation complete" /tmp/run_<run_id>
 
 ## Known Failure Patterns
 
-### Pattern A: `invalid reference format` — `JujudOCINamespace` baked as empty string in snap build
+### Pattern 1: `invalid reference format` — `JujudOCINamespace` baked as empty string in snap build
 
 **Symptom:**
 ```

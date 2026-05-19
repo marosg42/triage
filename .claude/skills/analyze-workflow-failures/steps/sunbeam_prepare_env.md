@@ -81,7 +81,7 @@ grep "maasserver_routable_pairs" /tmp/maas-logs/*/var/snap/maas/common/log/dump.
 
 ## Known Failure Patterns
 
-### Pattern: maasserver_routable_pairs does not exist
+### Pattern 1: maasserver_routable_pairs does not exist
 
 **Symptom (in GitHub Actions log):**
 ```

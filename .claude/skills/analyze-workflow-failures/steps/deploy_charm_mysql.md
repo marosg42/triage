@@ -56,7 +56,7 @@ for app_name, app in data.get('applications', {}).items():
 
 ## Known Failure Patterns
 
-### Pattern: juju wait-for 60m timeout — mysql/N stuck due to mysqld socket unavailable on certificates-relation-joined
+### Pattern 1: juju wait-for 60m timeout — mysql/N stuck due to mysqld socket unavailable on certificates-relation-joined
 
 **Symptom (GitHub Actions log):**
 ```
@@ -127,7 +127,7 @@ unit-mysql-1 ERROR    hook "certificates-relation-joined" failed: exit status 1
 
 ---
 
-### Pattern: juju wait-for 60m timeout — mysql/2 stuck "waiting for machine" (Juju agent never connected)
+### Pattern 2: juju wait-for 60m timeout — mysql/2 stuck "waiting for machine" (Juju agent never connected)
 
 **Symptom (GitHub Actions log):**
 ```
@@ -202,7 +202,7 @@ Machine 1: pending, ACTIVE (Nova), inst 4fce3bdf-8173-4cc9-80b5-2c7b4ce72f42
 
 ---
 
-### Pattern: juju wait-for 60m timeout — Nova DB connection failure blocks auxiliary VM provisioning
+### Pattern 3: juju wait-for 60m timeout — Nova DB connection failure blocks auxiliary VM provisioning
 
 **Symptom (GitHub Actions log):**
 ```
@@ -265,6 +265,67 @@ grep "retrying in 10s" $LOGBASE/models/admin-mysql-*.log | grep -oP "machine \d+
 
 ---
 
+### Pattern 4: juju wait-for 60m timeout — ops-framework defer deadlock (mysql/1) + blocking join_innodb_cluster (mysql/2)
+
+**Symptom (GitHub Actions log):**
+```
+ERROR timed out waiting for "mysql" to reach goal state
+Process completed with exit code 1.
+```
+
+**Symptom (juju status at timeout):**
+```
+Unit      Workload     Agent      Message
+mysql/0*  active       idle       Primary
+mysql/1   waiting      idle       waiting to join the cluster.   ← deferred event loop
+mysql/2   maintenance  executing  joining the cluster            ← blocking join call
+```
+
+All machines `started` (ACTIVE); all Juju agents connected (all in long-poll group). No hook failures in the mysql model (contrast with Pattern 1 where `hook "certificates-relation-joined" failed: exit status 1`).
+
+**Distinguishing from other patterns:**
+- **Pattern 1**: hook fails with `exit status 1` and `ERROR 2002 (HY000): Can't connect to MySQL socket`; unit shows `maintenance / Setting up cluster node`
+- **This pattern**: hooks complete successfully (exit 0), charm uses `event.defer()` internally; units show `waiting / idle` and `maintenance / executing`
+- **Pattern 2**: unit in `waiting / allocating`, machine `pending` — agent never connected
+- **Pattern 3**: machines `down`, Nova HTTP 500
+
+**Root cause:** Two interrelated charm-level race conditions in mysql rev 444 (`8.0/stable`), both triggered by fast VM provisioning:
+
+1. **mysql/1 — circular dependency deadlock**: The `certificates_relation_joined` handler in the charm checks for local InnoDB cluster metadata before configuring TLS. On a secondary node that hasn't joined yet, this check always fails. The charm defers the event. But TLS is needed to join, and joining is needed to have local metadata. The defer loop is perpetual: at 14:40:11Z the event was first deferred; at 15:46:02Z (over an hour later) it was still being deferred every ~1 minute via `flush_mysql_logs` run-commands.
+
+2. **mysql/2 — blocking join_innodb_cluster call**: mysql/2 progressed through its full initial hook queue (~22 hooks in 25 seconds). At 14:40:27Z the `database-peers-relation-changed for mysql/0` hook fired (triggered by mysql/0 achieving Primary status at 14:40:23Z). Inside this handler the charm called `join_innodb_cluster()`. This blocking call never returned, locking the juju uniter for the full 60-minute timeout.
+
+**Logsink evidence to look for:**
+```bash
+# mysql/1 defer loop (repeating every ~60s for the entire timeout)
+grep "unit-mysql-1" logsink.log | grep "Deferring.*certificates_relation_joined\|Failed to check if local cluster metadata"
+
+# mysql/2 blocked hook (last real entry; only update-status timers after)
+grep "unit-mysql-2" logsink.log | grep "AGENT-STATUS\|database-peers-relation-changed" | tail -5
+# Expect: last executing entry is database-peers-relation-changed for mysql/0; no completion logged
+
+# Confirm all agents connected (no Pattern 2)
+grep "moving machine.*to long poll group" admin-mysql-*.log
+```
+
+**Key timing pattern:**
+- mysql/0 became Primary at `t+8m` after step start
+- `certificates-relation-joined` fired on mysql/1 BEFORE the primary was established
+- mysql/0 was the founding member; mysql/1/2 were secondaries — only the primary escapes the circular dependency
+
+**Bug report:** https://github.com/canonical/mysql-operators/issues/189
+
+**Example (run 25964063826, UUID 6424e6d7, tor3-sqa-sunbeam cluster_1, 2026-05-16):**
+```
+# All 5 machines ACTIVE by 14:36:08Z; all in long-poll by 14:37:57Z
+# mysql/0 Primary at 14:40:23Z
+# mysql/1 certificates_relation_joined first deferred at 14:40:12Z
+# mysql/2 last hook (database-peers-relation-changed for mysql/0) at 14:40:27Z — never completed
+# juju wait-for timed out at 15:32:21Z (60m after step start at 14:32:04Z)
+```
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes
@@ -282,3 +343,4 @@ _Add more patterns below as they are discovered._
 - **v1.2** (2026-03-30): Linked bug report canonical/mysql-operators#189 for mysqld socket race pattern
 - **v1.3** (2026-05-04): Second occurrence of Juju agent never connected confirmed (run 25109744547, UUID 2edfd3e6, mysql/1); added crashdump evidence showing "never moved to long poll group" as the controller-side confirmation; updated root cause note to reference Nova console log as the missing diagnostic
 - **v1.4** (2026-05-04): Added Pattern C — Nova `oslo_db.exception.DBConnectionError` (HTTP 500) blocks provisioning of auxiliary VMs (self-signed-certificates, data-integrator); 11 retries exhausted over ~5-min window; AZ becoming "not valid" signals nova-compute restart; mysql TLS blocked as cascade; from run 25166260474 (UUID aa136dd9, tor3-sqa-sunbeam cluster_1, 2026-04-30)
+- **v1.5** (2026-05-18): Added Pattern 4 — ops-framework defer deadlock (mysql/1: circular TLS↔cluster-metadata dependency) + blocking `join_innodb_cluster` call (mysql/2: `database-peers-relation-changed` hook never returns); no hook exit-1 failures; same root cause as Pattern 1 (mysql-operators#189) but graceful deferral in place of exception; from run 25964063826 (UUID 6424e6d7, tor3-sqa-sunbeam cluster_1, main, 2026-05-16)

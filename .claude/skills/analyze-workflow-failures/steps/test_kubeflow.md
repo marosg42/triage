@@ -52,7 +52,7 @@ grep "etcdserver\|leader failure\|request timed out" generated/test_kubeflow/log
 
 ## Known Failure Patterns
 
-### Pattern A: etcd Leader Election causes `storage is (re)initializing` / HTTP 429
+### Pattern 1: etcd Leader Election causes `storage is (re)initializing` / HTTP 429
 
 **Symptom (GitHub Actions log / `4-commands[1].log`):**
 ```
@@ -102,7 +102,7 @@ tor3-sqa-dedicated_maas dh1_j2, branch main, UATS track/1.10, 2026-04-08)
 
 ---
 
-### Pattern B: mlflow-server nodePort Conflict — HTTP 503 on all MLflow API calls
+### Pattern 2: mlflow-server nodePort Conflict — HTTP 503 on all MLflow API calls
 
 **Observed in:** run 24122085937 (UUID a6794ed1-aad3-4186-a4c6-14af4c9c761a,
 ext-sqa-aks useast, branch main, UATS track/1.10, 2026-04-08)

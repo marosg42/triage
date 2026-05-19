@@ -62,7 +62,7 @@ grep -E "Node joined|Command failed.*cluster join" output.log
 
 ## Known Failure Patterns
 
-### Pattern: Terraform state lock contention during concurrent cluster joins
+### Pattern 1: Terraform state lock contention during concurrent cluster joins
 
 **Symptom (in GitHub Actions log):**
 ```
@@ -109,7 +109,7 @@ that node from succeeding.
 
 ---
 
-### Pattern: SSH "Broken pipe" during `sunbeam configure` (2-hour idle timeout)
+### Pattern 2: SSH "Broken pipe" during `sunbeam configure` (2-hour idle timeout)
 
 **Symptom (in GitHub Actions log):**
 ```
@@ -160,7 +160,7 @@ post-configure step (e.g., SR-IOV configuration phase).
 
 ---
 
-### Pattern: Terraform Juju provider "inconsistent result" on `glance-to-ceph` during bootstrap
+### Pattern 3: Terraform Juju provider "inconsistent result" on `glance-to-ceph` during bootstrap
 
 **Symptom (in GitHub Actions log):**
 ```
@@ -220,7 +220,7 @@ to SSH commands and those worked correctly — the bootstrap connected and ran f
 
 ---
 
-### Pattern: SSH "Broken pipe" during `sunbeam cluster join` (idle timeout, false failure)
+### Pattern 4: SSH "Broken pipe" during `sunbeam cluster join` (idle timeout, false failure)
 
 **Symptom (in GitHub Actions log):**
 ```
@@ -278,7 +278,7 @@ the node joined, no further action is needed on that node.
 
 ---
 
-### Pattern: Terraform apply timeout during `sunbeam configure` (Neutron API unreachable, 20-min hard timeout)
+### Pattern 5: Terraform apply timeout during `sunbeam configure` (Neutron API unreachable, 20-min hard timeout)
 
 **Applies to:** `sunbeam_maas_deploy` (dedicated MAAS) and `sunbeam_deploy` steps
 
@@ -376,7 +376,7 @@ shows exactly which resource timed out and when.
 
 ---
 
-### Pattern: Traefik routes not ready — 502 Bad Gateway during `sunbeam configure` (race after cluster joins)
+### Pattern 6: Traefik routes not ready — 502 Bad Gateway during `sunbeam configure` (race after cluster joins)
 
 **Applies to:** `sunbeam_deploy` step, multi-node clusters on `tor3-sqa-shared_maas`
 
@@ -489,7 +489,7 @@ still be settling for many minutes. Evidence from a second occurrence:
 
 ---
 
-### Pattern: "No cilium pod found on node" — node name FQDN vs. short hostname mismatch
+### Pattern 7: "No cilium pod found on node" — node name FQDN vs. short hostname mismatch
 
 **Applies to:** `sunbeam_deploy` step, `sunbeam cluster bootstrap` phase
 
@@ -581,7 +581,7 @@ for n in data['items']:
 
 ---
 
-### Pattern: `juju wait-for` HA timeout — HA controller machines deployed from scratch by MAAS
+### Pattern 8: `juju wait-for` HA timeout — HA controller machines deployed from scratch by MAAS
 
 **Applies to:** `sunbeam_maas_deploy` step, `sunbeam cluster bootstrap` phase (`Juju HA` step)
 
@@ -662,7 +662,7 @@ grep -h "metadata/status/mg64te" /tmp/maas-logs/*/var/log/syslog \
 
 ---
 
-### Pattern: `cinder-volume` install hook blocks on `(amqp) integration missing` during parallel joins — 20-minute wait expires
+### Pattern 9: `cinder-volume` install hook blocks on `(amqp) integration missing` during parallel joins — 20-minute wait expires
 
 **Applies to:** `sunbeam_deploy` step, `sunbeam cluster join` phase, multi-node parallel join on `tor3-sqa-testflinger`
 
@@ -753,7 +753,7 @@ grep "Node joined cluster" /tmp/run_<id>_failed.log
 
 ---
 
-### Pattern: `k8s` cluster-relation-changed hooks + MetalLB/CSI pods not ready block parallel join wait — 30-minute wait expires
+### Pattern 10: `k8s` cluster-relation-changed hooks + MetalLB/CSI pods not ready block parallel join wait — 30-minute wait expires
 
 **Applies to:** `sunbeam_deploy` step, `sunbeam cluster join` phase, multi-node parallel join on `tor3-sqa-testflinger`
 

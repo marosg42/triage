@@ -58,7 +58,7 @@ grep "dns-name.*10\.\|Attempting to connect\|Bootstrap complete" \
 
 ## Known Failure Patterns
 
-### Pattern: Juju controller connection lost — virtual infrastructure crash
+### Pattern 1: Juju controller connection lost — virtual infrastructure crash
 
 **Symptom:**
 ```

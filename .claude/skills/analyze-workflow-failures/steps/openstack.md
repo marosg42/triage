@@ -77,7 +77,7 @@ find <crashdump>/<machine_id>/baremetal/ -type f | wc -l
 
 ## Known Failure Patterns
 
-### Pattern: Bare-metal machine stuck in MAAS provisioning (vault/0 juju exec timeout)
+### Pattern 1: Bare-metal machine stuck in MAAS provisioning (vault/0 juju exec timeout)
 
 **Symptom:**
 ```
@@ -115,7 +115,7 @@ always `juju exec timed out` for the specific unit whose machine failed to provi
 
 ---
 
-### Pattern: juju-wait timeout on a non-vault charm unit
+### Pattern 2: juju-wait timeout on a non-vault charm unit
 
 **Symptom:**
 ```
@@ -135,7 +135,7 @@ status message in the juju status and the unit's charm agent log in the crashdum
 
 ---
 
-### Pattern: octavia-ovn-chassis hook error — `ovs-vsctl` not found in LXD container
+### Pattern 3: octavia-ovn-chassis hook error — `ovs-vsctl` not found in LXD container
 
 **Symptom:**
 ```

@@ -40,7 +40,7 @@ grep "failed to bootstrap\|not deployed\|ERROR" <run_failed.log> | grep -v "##\[
 
 ## Known Failure Patterns
 
-### Pattern: Bootstrap agent started but Juju API server never accessible (port 17070)
+### Pattern 1: Bootstrap agent started but Juju API server never accessible (port 17070)
 
 **Symptom (in `generated/juju_maas_controller/log.txt`):**
 ```
@@ -109,7 +109,7 @@ investigation. The machine IP was 10.241.37.101, MAAS system ID cfnqa8.
 
 ---
 
-### Pattern: MAAS controller instance stuck in "started" state (never reaches "Deployed")
+### Pattern 2: MAAS controller instance stuck in "started" state (never reaches "Deployed")
 
 **Symptom (in `generated/juju_maas_controller/log.txt` and GH Actions log):**
 ```
@@ -216,7 +216,7 @@ not contribute to the bootstrap failure.
 
 ---
 
-### Pattern D: SSH Broken Pipe during machine configuration script (exit code 255)
+### Pattern 3: SSH Broken Pipe during machine configuration script (exit code 255)
 
 **Symptom (in `generated/juju_maas_controller/log.txt`):**
 ```

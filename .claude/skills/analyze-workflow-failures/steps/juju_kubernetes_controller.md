@@ -82,7 +82,7 @@ grep "nginx.*stop\|nginx.*start\|Failed with result" /tmp/k8s-crashdump/*/4/bare
 
 ## Known Failure Patterns
 
-### Pattern: Controller pod starts but API never becomes reachable (60-attempt exhaustion)
+### Pattern 1: Controller pod starts but API never becomes reachable (60-attempt exhaustion)
 
 **Symptom (in `generated/juju_kubernetes_controller/log.txt` and GH Actions log):**
 ```

@@ -52,7 +52,7 @@ grep "wait-for\|timeout\|returned non-zero" run_<run_id>_failed.log
 
 ## Known Failure Patterns
 
-### Pattern A: HA Juju controller `wait-for` timeout — slow KVM deployment
+### Pattern 1: HA Juju controller `wait-for` timeout — slow KVM deployment
 
 **Symptom:**
 ```

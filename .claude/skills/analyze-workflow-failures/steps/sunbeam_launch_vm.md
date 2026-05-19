@@ -55,7 +55,7 @@ grep -l "test-instance\|10\.243\." /tmp/openstack-pods/logs-openstack-nova-*.txt
 
 ## Known Failure Patterns
 
-### Pattern A: VM launched but SSH returns "No route to host"
+### Pattern 1: VM launched but SSH returns "No route to host"
 
 **Symptom:**
 ```
@@ -88,7 +88,7 @@ reachable.
 
 ---
 
-### Pattern B: VM never reached ACTIVE (Nova BUILD timeout)
+### Pattern 2: VM never reached ACTIVE (Nova BUILD timeout)
 
 **Symptom:**
 ```

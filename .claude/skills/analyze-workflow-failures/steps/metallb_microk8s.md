@@ -47,7 +47,7 @@ grep "16443" /tmp/<uuid>/generated/metallb_microk8s/log.txt
 
 ## Known Failure Patterns
 
-### Pattern: MicroK8s API server "unexpected EOF" during juju add-model
+### Pattern 1: MicroK8s API server "unexpected EOF" during juju add-model
 
 **Symptom:**
 ```

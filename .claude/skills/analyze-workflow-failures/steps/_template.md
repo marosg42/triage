@@ -39,7 +39,7 @@ grep -h "<keyword>" /tmp/maas-logs/*/var/log/ | sort
 
 ## Known Failure Patterns
 
-### Pattern: <short name>
+### Pattern 1: <short name>
 
 **Symptom:**
 ```

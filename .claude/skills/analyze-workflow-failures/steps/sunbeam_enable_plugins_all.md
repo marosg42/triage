@@ -54,7 +54,7 @@ grep "wait timed out\|CalledProcessError.*vault.*unseal" /tmp/run_<run_id>_faile
 
 ## Known Failure Patterns
 
-### Pattern A: vault unseal timeout — raft follower bootstrap/challenge not completing
+### Pattern 1: vault unseal timeout — raft follower bootstrap/challenge not completing
 
 **Symptom (GitHub Actions log):**
 ```
@@ -99,7 +99,7 @@ vault-k8s 1.18/stable rev 446, 2026.1/edge, 2026-04-02)
 
 ---
 
-### Pattern B: vault update-status hook failure — vault/0 enters error state during enable
+### Pattern 2: vault update-status hook failure — vault/0 enters error state during enable
 
 **Symptom (GitHub Actions log):**
 ```
@@ -142,7 +142,7 @@ vault-k8s 1.18/stable rev 446, 2026-04-09)
 
 ---
 
-### Pattern C: observability enable juju-wait timeout — aodh/gnocchi payload containers not ready
+### Pattern 3: observability enable juju-wait timeout — aodh/gnocchi payload containers not ready
 
 **Symptom (GitHub Actions log):**
 ```
