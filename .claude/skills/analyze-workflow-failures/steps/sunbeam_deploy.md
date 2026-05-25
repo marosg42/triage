@@ -871,6 +871,290 @@ grep "Node joined cluster" /tmp/run_<id>_failed.log
 
 ---
 
+### Pattern 11: `sunbeam cluster join` false failure — control-plane node never appears in deployment-labelled K8S node list
+
+**Applies to:** `sunbeam_deploy` step, `sunbeam cluster join` phase, multi-node control-plane joins on `tor3-sqa-shared_maas`
+
+**Symptom (in GitHub Actions log):**
+```
+subprocess.CalledProcessError: Command
+  ['ssh', ..., 'solqa-shared-maas-server-32.maas', '--', 'sunbeam', 'cluster', 'join', '<token>',
+   '--role', 'control', '--role', 'compute', '--accept-defaults']
+returned non-zero exit status 1.
+```
+Similar errors occurred for `solqa-shared-maas-server-34.maas` (`control,storage`) and
+`solqa-shared-maas-server-36.maas` (`control`).
+
+**In `generated/sunbeam/output.log`:**
+```
+Warning: Permanently added 'solqa-shared-maas-server-32.maas' (ED25519) to the list of known hosts.
+Error: Failed to get k8s nodes to update
+```
+The step fails at the runner, not with SSH exit code 255.
+
+**In the failing nodes' sosreports**
+(`home/ubuntu/snap/openstack/common/logs/sunbeam-<join-ts>.log`):
+```
+11:33:46 sunbeam.steps.k8s DEBUG K8S nodes filtered by deployment label: [solqa-shared-maas-server-31 only]
+11:33:46 sunbeam.steps.k8s DEBUG No matching k8s node found for solqa-shared-maas-server-32.maas, cluster IPs ['10.241.32.68']
+11:33:46 sunbeam.steps.k8s DEBUG Failed to get k8s nodes to update
+Traceback (most recent call last):
+  File "/snap/openstack/1000/lib/python3.12/site-packages/sunbeam/steps/k8s.py", line 474, in _get_k8s_node_to_update
+```
+Equivalent traces exist for server-34 (`10.241.32.64`) and server-36 (`10.241.32.70`).
+
+**Post-failure state:**
+- `generated/sunbeam/sunbeam_cluster_list.txt` shows all 7 machines `running`, including the expected
+  control+compute, control+storage, and control-only role combinations.
+- `generated/sunbeam/kubectl_get_node.txt` shows the joined control-plane nodes `32`, `34`, and `36`
+  as `Ready control-plane,worker`.
+- `generated/sunbeam/juju_status_openstack-machines.txt` shows `k8s/1`, `k8s/2`, and `k8s/3` active,
+  while bootstrap `k8s/0` on machine 0 is `unknown/lost` by collection time.
+
+**Root cause:** During parallel control-plane joins, the openstack snap's post-join validation step
+(`sunbeam.steps.k8s._get_k8s_node_to_update`) polls the Kubernetes API for a deployment-labelled node
+matching the joining machine's hostname/IP. For servers 32, 34, and 36, that lookup never found a match
+before the command exited, even though the nodes did join and later appeared Ready. This makes the
+failure a **false negative in Sunbeam's K8S-node discovery/validation logic** rather than a hard SSH or
+Terraform failure. The evidence points to delayed or inconsistent control-plane registration/label
+propagation during concurrent control-node joins.
+
+**Supporting evidence:**
+- Node 34's `snap.k8s` journal shows transient etcd peer instability for node 36 during the join window:
+  `dial tcp 10.241.32.70:2380: connect: connection refused` followed by peer inactive/active flaps.
+- The failing nodes' Sunbeam logs repeatedly list only the bootstrap node in the deployment-filtered K8S
+  node set immediately before raising `Failed to get k8s nodes to update`.
+- The final status snapshot proves the joined control-plane nodes existed after the failure, so the join
+  work mostly completed and the validation path is what returned exit 1.
+
+**How to confirm:**
+```bash
+# Exact false-negative signature in node-local Sunbeam logs (inside sosreports):
+tar -xJOf generated/sunbeam/sosreport-<node>-*.tar.xz \
+  '*/home/ubuntu/snap/openstack/common/logs/sunbeam-*.log' \
+  | grep -E 'No matching k8s node found|Failed to get k8s nodes to update'
+
+# Joined control-plane nodes exist after the failure:
+cat generated/sunbeam/kubectl_get_node.txt
+cat generated/sunbeam/sunbeam_cluster_list.txt
+
+# Bootstrap/control-plane fallout visible in final Juju status:
+grep -E 'k8s/0|k8s/[123]|sunbeam-machine/0' generated/sunbeam/juju_status_openstack-machines.txt
+```
+
+**Distinguishing from other join failures:**
+- vs. Pattern 1 (terraform state lock): no `Error acquiring the state lock`; stderr is only `Failed to get k8s nodes to update`
+- vs. Pattern 4 (SSH Broken pipe): exit code 1, not 255; no `client_loop: send disconnect: Broken pipe`
+- vs. Pattern 10 (`juju wait-for` timeout): no `wait timed out after 1799...`; failure is in `sunbeam.steps.k8s` matching logic
+
+**Observed in:**
+- Run 25987960158 (UUID: 9407930c-870f-4485-9768-8211e5ff610c, tor3-sqa-shared_maas dh1_j9_1,
+  branch `aipoc`, openstack snap rev 1000, k8s v1.32.11 / rev 4754, 2026-05-17)
+
+---
+
+### Pattern 12: `sunbeam configure` hypervisor wait times out because bootstrap `sunbeam-machine/0` is permanently `lost` after controller migration / credential rotation
+
+**Applies to:** `sunbeam_deploy` step, `sunbeam configure` phase, `tor3-sqa-shared_maas`
+
+**Symptom (in GitHub Actions log):**
+```text
+subprocess.CalledProcessError: Command
+  ['ssh', ..., 'solqa-shared-maas-server-31.maas', '--', 'sunbeam', 'configure', '-m', 'manifest.yaml']
+returned non-zero exit status 1.
+```
+
+**In `generated/sunbeam/output.log`:**
+```text
+Project external network name [physnet1] (physnet1): # openrc for demo
+...
+wait timed out after 1799.9999991949999s
+...
+'openstack-hypervisor/2': UnitStatus(
+  workload_status=StatusInfo(current='waiting', message='(certificates) integration incomplete', ...),
+...
+'sunbeam-machine/0': UnitStatus(
+  workload_status=StatusInfo(current='unknown', message="agent lost, see 'juju show-status-log sunbeam-machine/0'"),
+  juju_status=StatusInfo(current='lost', message='agent is not communicating with the server', ...),
+```
+
+**In the bootstrap node sosreport**
+(`var/log/juju/unit-sunbeam-machine-0.log`):
+```text
+2026-05-16 11:10:27 WARNING ... report migration status failed: failed to report phase progress: connection is shut down
+2026-05-16 11:10:31 ERROR juju.worker.apicaller connect.go:209 Failed to connect to controller: invalid entity name or password (unauthorized access)
+```
+
+**In the bootstrap node Sunbeam CLI log**
+(`home/ubuntu/snap/openstack/common/logs/sunbeam-20260516-125308.933785.log`):
+```text
+12:56:46,662 ... Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+12:56:46,667 ... Waiting for apps ['openstack-hypervisor'] to be {'unknown', 'active'}
+...
+13:26:46,809 sunbeam.steps.hypervisor WARNING wait timed out after 1799.9999991949999s
+```
+
+**Key signals:**
+- Exit code **1** (not 255) — this is a real remote command failure, not SSH disconnect
+- Demo-setup terraform completed successfully before the failure (`Apply complete! Resources: 0 added, 0 changed, 0 destroyed.`)
+- The failing wait is inside `sunbeam.steps.hypervisor`, after terraform apply, while waiting for the `openstack-machines` model to settle
+- `sunbeam-machine/0` is already `lost` in the first wait snapshot and never recovers
+- The bootstrap node's `unit-sunbeam-machine-0.log` shows Juju migration / reconnect churn ending in `invalid entity name or password (unauthorized access)`
+- `openstack-hypervisor/2` later flips to `waiting: (certificates) integration incomplete`, but final `juju_status_openstack-machines.txt` shows all hypervisors active — that was transient, unlike the lost bootstrap `sunbeam-machine/0`
+
+**Root cause:** `sunbeam configure` successfully finishes its terraform work, then waits for the hypervisor layer to converge. That wait can never succeed because the bootstrap node's `sunbeam-machine/0` Juju unit became permanently `lost` during controller migration / credential rotation at ~11:10Z. The unit restarted, but its final reconnect attempt failed with `invalid entity name or password`, leaving the agent unable to communicate with the controller. A later transient certificate-related flap on `openstack-hypervisor/2` added noise, but the durable blocker was the lost bootstrap `sunbeam-machine/0` unit.
+
+**How to confirm:**
+```bash
+# Runner-visible timeout and blocking statuses:
+grep -n 'wait timed out after 1799\|sunbeam-machine/0\|openstack-hypervisor/2' generated/sunbeam/output.log
+
+# Node-local configure log proving terraform completed and the wait happened afterwards:
+tar -xJOf generated/sunbeam/sosreport-<bootstrap-node>-*.tar.xz \
+  '*/home/ubuntu/snap/openstack/common/logs/sunbeam-20260516-125308.933785.log' \
+  | grep -E 'Apply complete|Waiting for apps|wait timed out'
+
+# Bootstrap unit agent failure:
+tar -xJOf generated/sunbeam/sosreport-<bootstrap-node>-*.tar.xz \
+  '*/var/log/juju/unit-sunbeam-machine-0.log' \
+  | grep -E 'migration phase|connection is shut down|invalid entity name or password'
+```
+
+**Observed in:**
+- Run 25959668487 (UUID: ac3ebe2d-549b-4b76-824e-4230c86c2c61, tor3-sqa-shared_maas dh1_j9_1,
+  branch `main`, openstack snap rev 1000 / `2024.1/beta`, 2026-05-16)
+
+---
+
+### Pattern 13: `sunbeam cluster join` false-negative — 1200s wait expires while hypervisor hooks are still converging
+
+**Applies to:** `sunbeam_deploy` step, `sunbeam cluster join` phase, multi-node join on `tor3-sqa-testflinger`
+
+**Symptom (in GitHub Actions log):**
+```
+subprocess.CalledProcessError: Command
+  ['ssh', ..., 'barbos.maas', '--', 'sunbeam', 'cluster', 'join', '<token>',
+   '--role', 'compute', '--role', 'storage', '--accept-defaults']
+returned non-zero exit status 1.
+```
+
+**In STDERR of the failing join:**
+```
+wait timed out after 1199.999998668s
+Status(
+  model=ModelStatus(name='openstack-machines', ...),
+  apps={
+    'openstack-hypervisor': AppStatus(
+      units={
+        'openstack-hypervisor/0': UnitStatus(
+          workload_status=StatusInfo(current='active', ...),
+          juju_status=StatusInfo(current='executing', message='running config-changed hook', ...),
+        ),
+        'openstack-hypervisor/1': UnitStatus(... current='executing' ...),
+        'openstack-hypervisor/2': UnitStatus(... current='executing' ...),
+      },
+    ),
+  },
+)
+```
+Only machines `0..3` exist in the timeout snapshot; later join machines are not present yet.
+
+**Supporting evidence:**
+- `generated/sunbeam/juju_debug_log_openstack-machines.txt` shows `openstack-hypervisor/1` and `/2` still finishing `config-changed` / relation hooks throughout `08:50-08:52Z`
+- The same log shows later machines still being admitted **after** the timeout fired:
+  - `08:52:22` → `machine 4 already started`
+  - `08:52:56` → `machine 5 already started`
+- Final state proves recovery:
+  - `generated/sunbeam/sunbeam_cluster_list.txt` shows `barbos` `running` with `compute` and `storage` active
+  - `generated/sunbeam/juju_status_openstack-machines.txt` shows all `cinder-volume`, `openstack-hypervisor`, `k8s`, and `sunbeam-machine` units `active idle`
+
+**Root cause:** `sunbeam cluster join` uses an internal 1200-second `juju wait-for model openstack-machines`. In this run, `barbos` joined, but the model was still converging: hypervisor hooks on already-admitted nodes were still executing and additional queued joins were still being brought in. The pipeline's `products/sunbeam/deploy_sunbeam.py` submits joins via `ThreadPoolExecutor(max_workers=3)` and later raises on `future.result()`, so one join timing out aborts the whole step even when the node and overall cluster finish converging shortly afterwards. This is a **false negative** caused by the per-join wait deadline being shorter than real convergence under multi-node churn.
+
+**How to confirm:**
+```bash
+# Runner-visible timeout:
+grep -n 'wait timed out after 1199' generated/sunbeam/output.log
+
+# Timeout snapshot shows transient executing hooks, not a durable error:
+grep -n 'openstack-hypervisor/0\|openstack-hypervisor/1\|openstack-hypervisor/2\|running config-changed hook' generated/sunbeam/output.log
+
+# Juju model still admitting later nodes after timeout:
+grep -n '08:52:22\|08:52:56' generated/sunbeam/juju_debug_log_openstack-machines.txt
+
+# Final state shows success despite the exit code:
+cat generated/sunbeam/sunbeam_cluster_list.txt
+cat generated/sunbeam/juju_status_openstack-machines.txt
+```
+
+**Distinguishing from other join false negatives:**
+- vs. Pattern 9 (`cinder-volume` / `(amqp) integration missing`): same 1200s class of timeout, but here the snapshot shows **active** units with transient `executing` hooks rather than a `blocked` `cinder-volume` workload
+- vs. Pattern 10 (`k8s` / Unready Pods): this run has a 1200s timeout and no `k8s` workload `waiting` message
+- vs. Pattern 11 (`Failed to get k8s nodes to update`): stderr is `wait timed out ...`, not a K8S node-matching exception
+
+**Observed in:**
+- Run 25955678538 (UUID: a82859ea-8b32-4e7a-bc07-e751dcec68f0, tor3-sqa-testflinger cluster_3, branch `main`, `barbos.maas` roles `compute,storage`, openstack snap `2024.1/beta`, 2026-05-16)
+- Run 25948797819 (UUID: f846183c-519b-4dc5-affd-611837fb05b1, tor3-sqa-testflinger cluster_3, branch `main`, `fizeau.maas` roles `control,storage`, openstack snap `2024.1/beta`, 2026-05-16); stderr showed `wait timed out after 1199.9999989389999s`, final `sunbeam_cluster_list.txt` showed `fizeau` `running` with `control`+`storage`, `kubectl_get_node.txt` showed `fizeau Ready control-plane,worker`, and `juju_debug_log_openstack-machines.txt` still admitted machines 4 and 5 after the timeout.
+- Run 25940588751 (UUID: 72cea7f3-5a7d-4baa-ac17-ebb88051fc40, tor3-sqa-testflinger cluster_3, branch `main`, `barbos.maas` roles `control,compute`, openstack snap `2024.1/beta`, 2026-05-15); stderr showed `wait timed out after 1799.999998577s`, the timeout snapshot already had `barbos` machine `3` with `k8s/2` and `openstack-hypervisor/2` active, `openstack-hypervisor/3` on later machine `5` still `executing` `ceph-access-relation-changed`, and final `sunbeam_cluster_list.txt` / `kubectl_get_node.txt` showed `barbos` fully joined and Ready.
+- Run 25928796613 (UUID: 02c1a007-6d9c-4a94-b412-12f62b3bceb8, tor3-sqa-testflinger cluster_3, branch `main`, `napple.maas` roles `control,storage` timed out first after `1199.9999981559995s`, then `fizeau.maas` roles `control,compute` later raised the terminal `CalledProcessError` after `1799.9999977789994s`; both nodes were present in final `sunbeam_cluster_list.txt`, final `kubectl_get_node.txt` showed `fizeau` and `napple` Ready, and final `juju_status_openstack-machines.txt` showed `cinder-volume/2`, `openstack-hypervisor/2`, and all `k8s/*` units `active idle`.
+- Run 25932491932 (UUID: a14f61b1-6b73-400c-9e54-5761c4e197e9, tor3-sqa-testflinger cluster_1, branch `main`, `ancientminister.maas` roles `control,compute`, openstack snap `2024.1/beta`, 2026-05-15); stderr showed `wait timed out after 1799.9999987379997s`, the timeout snapshot had `cinder-volume/3` still `waiting` on backends with `cinder-volume-ceph/3` `executing` `ceph-access-relation-changed` and `openstack-hypervisor/3` still `executing` `ovsdb-cms-relation-changed`, but final `sunbeam_cluster_list.txt`, `kubectl_get_node.txt`, and `juju_status_openstack-machines.txt` showed `ancientminister` fully joined and the model converged.
+
+---
+
+### Pattern 14: `sunbeam configure` runs before Neutron finishes converging on a newly joined control-plane node
+
+**Applies to:** `sunbeam_deploy` step, `sunbeam configure` phase, `tor3-sqa-testflinger`
+
+**Symptom (in GitHub Actions log):**
+```
+subprocess.CalledProcessError: Command ['ssh', ..., 'heatmor.maas', '--',
+ 'sunbeam', 'configure', '-m', 'manifest.yaml'] returned non-zero exit status 1.
+```
+
+**In `generated/sunbeam/output.log`:**
+```
+16:35:59  sunbeam cluster list
+          ancientminister running control active
+16:35:59  sunbeam configure -m manifest.yaml
+16:37:35  Error configuring cloud
+          sunbeam.core.terraform.TerraformException: terraform command failed: ... terraform apply ...
+```
+The terraform wrapper reports an empty stderr, so the useful evidence comes from the post-failure snapshots.
+
+**Supporting evidence:**
+- `products/sunbeam/deploy_sunbeam.py` calls `configure_sunbeam(nodes[0])` immediately after `resize_cluster(nodes[0])`; there is no wait for the `openstack` model to become healthy.
+- `generated/sunbeam/kubectl_get_pod_detailed.txt`: `neutron-1` was created at `16:27:23Z` on `crustle`, but its `Ready` condition did not become `True` until `17:03:00Z`.
+- `generated/sunbeam/juju_status_openstack.txt` (17:04:26Z): `neutron/1` is still `blocked` with `(container:neutron-server) healthcheck failed: online`.
+- The final machine-side state had already converged (`generated/sunbeam/sunbeam_cluster_list.txt` shows all requested nodes running), so the failure is in service convergence after the joins, not in the joins themselves.
+
+**Root cause:** `deploy_sunbeam.py` treats a successful `sunbeam cluster list` / `cluster resize` as sufficient to start `sunbeam configure`, but in this run the OpenStack control plane was still converging. A newly added Neutron unit on the joined control-plane node was not yet healthy, so the Neutron API layer was incomplete when `sunbeam configure` launched its demo-setup terraform apply. Terraform then failed quickly inside the snap with only the generic `terraform command failed` wrapper surfaced to the runner. This is effectively a premature-configure race: cluster membership had converged enough to list nodes, but the `openstack` model had not.
+
+**How to confirm:**
+```bash
+# Configure starts immediately after the final cluster list:
+grep -n 'sunbeam cluster list\|sunbeam configure -m manifest.yaml' generated/sunbeam/output.log
+
+# Newly added neutron pod is not Ready until well after the failure:
+python3 - <<'PY'
+import yaml
+with open('generated/sunbeam/kubectl_get_pod_detailed.txt') as f:
+    data=yaml.safe_load(f)
+for item in data['items']:
+    if item.get('metadata', {}).get('name') == 'neutron-1':
+        print(item['metadata']['creationTimestamp'])
+        for cond in item['status']['conditions']:
+            if cond['type'] == 'Ready':
+                print(cond['lastTransitionTime'])
+PY
+
+# Post-failure status still shows neutron unhealthy:
+grep -n 'neutron.*healthcheck failed' generated/sunbeam/juju_status_openstack.txt
+```
+
+**Observed in:**
+- Run 25921180840 (UUID: 72595a1b-fa63-4f49-9917-5bcae8737c4c, tor3-sqa-testflinger cluster_1, branch `main`, openstack snap rev 1000 / `2024.1/beta`, 2026-05-15).
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes
@@ -895,3 +1179,11 @@ _Add more patterns below as they are discovered._
 - **v1.9** (2026-04-14): Second occurrence of `juju wait-for` HA timeout — same cluster (dh1_j2), openstack rev 945 / 2024.1/stable; juju-3 took 12.3 min to deploy, leaving only 2m42s before timeout; from run 24397128547 (UUID: 6238d910, 2026-04-14).
 - **v2.0** (2026-05-04): Added `cinder-volume` install hook blocks on `(amqp) integration missing` during parallel joins — same mechanism as LP bug #2121929 (parallel joins cause Juju model churn; a unit on a concurrently-joining peer node runs its install hook for >20 min; behaim's 1200s internal wait expires; node is actually in the cluster and unit self-heals); from run 25179144394 (UUID: a1c69781, tor3-sqa-testflinger cluster_2, 2024.1/beta, 2026-04-30).
 - **v2.1** (2026-05-04): Added `k8s` cluster-relation-changed + MetalLB/CSI pods not ready variant of parallel join false failure — two nodes (anonster, crustle) fail simultaneously after 1800s wait; blocking condition is k8s cluster membership hooks running while DaemonSet pods for new nodes are not yet Ready; same false-failure outcome as v2.0 but different blocker and 1800s (not 1200s) timeout; from run 25177679456 (UUID: a12c852e, tor3-sqa-testflinger cluster_1, 2024.1/beta, 2026-04-30).
+- **v2.2** (2026-05-19): Added control-plane join false-negative pattern — `sunbeam.steps.k8s._get_k8s_node_to_update` cannot find the joining node in the deployment-labelled K8S node list, raising `Failed to get k8s nodes to update` even though the control-plane nodes appear later as Ready; from run 25987960158 (UUID: 9407930c-870f-4485-9768-8211e5ff610c, tor3-sqa-shared_maas dh1_j9_1, branch `aipoc`, openstack rev 1000).
+- **v2.3** (2026-05-19): Added configure-time hypervisor wait timeout pattern — demo-setup terraform completes, but `sunbeam configure` times out after 1800s because bootstrap `sunbeam-machine/0` is permanently `lost` after controller migration / credential rotation and later reconnects fail with `invalid entity name or password`; from run 25959668487 (UUID: ac3ebe2d-549b-4b76-824e-4230c86c2c61, tor3-sqa-shared_maas dh1_j9_1, branch `main`, openstack rev 1000 / `2024.1/beta`).
+- **v2.4** (2026-05-19): Added 1200s parallel-join false-negative variant — `barbos.maas` (`compute,storage`) timed out in `sunbeam cluster join` while `openstack-hypervisor` hooks were still executing and later nodes were still being admitted; final cluster and Juju status snapshots proved full convergence after the timeout; from run 25955678538 (UUID: a82859ea-8b32-4e7a-bc07-e751dcec68f0, tor3-sqa-testflinger cluster_3, branch `main`).
+- **v2.5** (2026-05-19): Added second confirmation of the 1200s parallel-join false-negative pattern on `tor3-sqa-testflinger` cluster_3 — `fizeau.maas` (`control,storage`) timed out in `sunbeam cluster join`, but final cluster/K8S/Juju snapshots showed the node fully joined and later machines were still being admitted after the timeout; from run 25948797819 (UUID: f846183c-519b-4dc5-affd-611837fb05b1, branch `main`).
+- **v2.6** (2026-05-19): Added third confirmation of the same parallel-join false-negative family on `tor3-sqa-testflinger` cluster_3 — `barbos.maas` (`control,compute`) timed out after 1800s in `sunbeam cluster join`, but the timeout snapshot already showed `barbos` active in Juju while a later node's `openstack-hypervisor` hook was still executing, and final cluster/K8S snapshots showed `barbos` fully joined; from run 25940588751 (UUID: 72cea7f3-5a7d-4baa-ac17-ebb88051fc40, branch `main`).
+- **v2.7** (2026-05-19): Added fourth confirmation of the same `tor3-sqa-testflinger` cluster_3 parallel-join false-negative family — `napple.maas` timed out first after 1200s and `fizeau.maas` later surfaced the fatal `CalledProcessError` after 1800s, but final cluster/K8S/Juju snapshots showed both nodes fully joined and all relevant units recovered to `active idle`; from run 25928796613 (UUID: 02c1a007-6d9c-4a94-b412-12f62b3bceb8, branch `main`).
+- **v2.8** (2026-05-19): Added fifth confirmation of the same `tor3-sqa-testflinger` parallel-join false-negative family — `ancientminister.maas` (`control,compute`) timed out after 1800s on cluster_1 while `cinder-volume/3`, `cinder-volume-ceph/3`, and `openstack-hypervisor/3` were still converging, but final cluster/K8S/Juju snapshots showed `ancientminister` fully joined and the model recovered; from run 25932491932 (UUID: a14f61b1-6b73-400c-9e54-5761c4e197e9, branch `main`).
+- **v2.9** (2026-05-19): Added premature `sunbeam configure` / Neutron convergence race pattern — `deploy_sunbeam.py` starts `sunbeam configure` immediately after `cluster resize` with no wait for the `openstack` model; in run 25921180840 (UUID: 72595a1b-fa63-4f49-9917-5bcae8737c4c, tor3-sqa-testflinger cluster_1) `neutron-1` was created at 16:27:23Z but only became Ready at 17:03:00Z, while `sunbeam configure` failed at 16:37:35Z and post-failure status showed `neutron/1` blocked with `(container:neutron-server) healthcheck failed: online`.

@@ -99,6 +99,28 @@ QEMU logs.
 
 ---
 
+### Pattern 2: `sunbeam cluster deploy` false-negative 30-minute timeout after apparent convergence
+
+**Symptom:**
+```
++ sunbeam cluster deploy
+wait timed out after 1799.9999981459987s
+Error: wait timed out after 1799.9999981459987s
+Process completed with exit code 1.
+```
+
+**Root cause:** `sunbeam cluster deploy` hit its internal ~30 minute wait deadline even though the deployment had effectively converged. The timeout snapshot in the GitHub log already showed the `openstack-machines` model in `available` state with all machine-model applications (`cinder-volume`, `k8s`, `microceph`, `openstack-hypervisor`, `sunbeam-machine`) `active`, and post-failure collection showed the `openstack-infra`, `openstack-machines`, and `openstack` models all active. This points to a false-negative readiness gate inside `sunbeam cluster deploy` rather than a workload actually failing.
+
+**Evidence to look for:**
+- GitHub failed log: `sunbeam cluster deploy` starts immediately after bootstrap, then fails exactly `1799.999...s` later with `wait timed out`
+- The timeout snapshot dumped by the command shows `model_status=StatusInfo(current='available'...)` for `openstack-machines`
+- The same timeout snapshot shows all machine-model apps and units `active`/`idle`
+- Post-failure `generated/sunbeam/juju_status_openstack-infra.txt`, `juju_status_openstack-machines.txt`, and `juju_status_openstack.txt` show all models active; only some `mysql` units still report `Agent=executing` while workload stays `active`
+
+**Observed in:** run 25950047554 (UUID 543ceda1-ee88-4631-ad00-8604348744c6, tor3-sqa-dedicated_maas dh1_j2, branch `main`, addon `sunbeam_2024.1_beta`, 2026-05-16).
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes
@@ -135,3 +157,9 @@ _Add more patterns below as they are discovered._
   same substrate/cluster; juju-3 on `sunset` finished cloud-init 11s after deadline;
   curtin 12m18s + cloud-init 2m47s = 15m05s total; juju-2 on `noma` deployed in 7m33s;
   no I/O errors in QEMU logs.
+- **v1.6** (2026-05-19): Added Pattern 2 — `sunbeam cluster deploy` hit its hardcoded
+  1800s timeout even though the `openstack-machines` timeout snapshot was already fully
+  active and post-failure collection showed all Sunbeam models active; likely a false-
+  negative readiness gate inside the command rather than a broken deployment. Observed in
+  run 25950047554 (UUID 543ceda1-ee88-4631-ad00-8604348744c6, tor3-sqa-dedicated_maas
+  dh1_j2).
