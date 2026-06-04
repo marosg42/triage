@@ -106,6 +106,52 @@ grep -h "post-refresh" /tmp/maas-logs/*/var/log/syslog | sort
 **See also:** `patterns/maas-snap-apparmor-dbupgrade.md` for full detail including both
 Variant A (hook timeout, rollback) and Variant B (hook early exit, silent migration skip).
 
+### Pattern 2: testflinger node missing configured OSD device
+
+**Symptom (in GitHub Actions log):**
+```
+wipefs: error: /dev/disk/by-dname/disk1: probing initialization failed: No such file or directory
+subprocess.CalledProcessError: Command '['ssh', ..., 'ledian.maas', '--', 'sudo', 'wipefs', '-a', '/dev/disk/by-dname/disk1']' returned non-zero exit status 1.
+```
+
+**Root cause:** The `sunbeam_prepare_env` action always runs `clean_disks.py` before manifest generation. On `tor3-sqa-testflinger` the environment config can declare a single cluster-wide `osd_devices` path (`/dev/disk/by-dname/disk1`), but the fetched node list may include a machine that does not expose that device. In this run `ledian.maas` had only `disk0`/`nvme0n1`, so `clean_disks.py` aborted on the first `wipefs` call.
+
+**Quick check:**
+```bash
+# Confirm the configured device path for the environment
+sed -n '/tor3-sqa-testflinger-cluster_1:/,/^[^ ]/p' config/sunbeam.yaml | grep osd_devices
+
+# Show the failing node's by-dname inventory from the layer log
+sed -n '135,153p' generated/sunbeam/output.log
+
+# Confirm hardware inventory from the node sosreport
+tar -xOf generated/sunbeam/sosreport-ledian-*.tar.xz '*/sos_commands/block/lsblk' | head -20
+```
+
+### Pattern 3: bootstrap node snap store timeout during MicroCeph install
+
+**Symptom (in GitHub Actions log):**
+```text
+error: cannot perform the following tasks:
+- Fetch and check assertions for snap "snapd" (26865) (cannot get device session from store: store server returned status 408 ...)
+subprocess.CalledProcessError: Command '['ssh', ..., 'node1.dh1-j6.tor3-sqa-dedicated-maas.solutionsqa', '--', 'sudo', 'snap', 'install', 'microceph', '--channel', 'squid/candidate']' returned non-zero exit status 1.
+```
+
+**Root cause:** `sunbeam_prepare_env` runs `clean_disks.py` before any deployment work. That script unconditionally installs the `microceph` snap on the freshly provisioned target node so it can use `microceph.ceph-bluestore-tool zap-device` to wipe the configured OSD disk. In this run the node had booted successfully and SSH was healthy, but snapd failed almost immediately while talking to the Snap Store: the `Fetch and check assertions for snap "snapd"` task got an HTTP 408 from the store. Because `clean_disks.py` does not retry or fall back when `snap install microceph` fails, the entire `sunbeam_prepare_env` layer aborts before manifest generation or any Sunbeam deployment begins.
+
+**Quick check:**
+```bash
+# GitHub / layer log: failing command and traceback
+sed -n '258,267p' generated/sunbeam/output.log
+sed -n '128,137p' generated/lastlines.txt
+
+# Node sosreport: snapd confirms the store-side timeout
+SOS=$(find generated/sunbeam -name 'sosreport-node1-*.tar.xz' | head -1)
+tar -xOf "$SOS" '*/sos_commands/snap/journalctl_--no-pager_--unit_snapd' \
+  | grep 'Fetch and check assertions\|408\|microceph'
+tar -xOf "$SOS" '*/sos_commands/snap/snap_changes_--abs-time' | grep 'Install "microceph"'
+```
+
 ---
 
 _Add more patterns below as they are discovered._
@@ -121,4 +167,6 @@ _Add more patterns below as they are discovered._
 
 ## Version History
 
+- **v1.2** (2026-05-27): Added Pattern 3 — freshly provisioned bootstrap node fails `snap install microceph --channel squid/candidate` during `clean_disks.py` because snapd's `Fetch and check assertions for snap "snapd"` task gets HTTP 408 from the Snap Store; from run 26444914683 (UUID 4c95aea6-4e93-4bd5-8703-c3747f93f640, tor3-sqa-virtual_maas cluster_1).
+- **v1.1** (2026-05-25): Added Pattern 2 — `tor3-sqa-testflinger` node missing configured OSD device (`/dev/disk/by-dname/disk1`) causes `clean_disks.py` to fail immediately with `wipefs: ... No such file or directory` before manifest generation.
 - **v1.0** (2026-03-23): Initial version from analysis of runs 23388633087, 23377136139, 23406159064

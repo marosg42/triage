@@ -286,13 +286,52 @@ the external packets are still at risk.
 4. Alternatively: configure Cilium with `--install-no-conntrack-iptables-rules=false` or
    use a policy that explicitly permits transit traffic through device endpoints
 
+### Pattern 4: `virtual_maas` SSH Tunnel Drops During Validation (False Refstack Failure)
+
+**Symptom:** `quick` and `smoke` complete successfully (`Failed: 0`), then the step fails while
+starting or waiting for `sunbeam validation run refstack` with:
+
+```text
+subprocess.CalledProcessError: Command '['ssh', ... 'sunbeam', 'validation', 'run', 'refstack', ...]'
+returned non-zero exit status 255.
+```
+
+The failing stderr may contain only the host-key warning, with no Tempest traceback or failed
+Refstack test summary.
+
+**Root cause:** On `tor3-sqa-virtual_maas`, the bootstrap node is reached through an SSH tunnel to
+the virtual lab infra. If that tunnel drops mid-step, the outer SSH session from the runner to the
+bootstrap node dies with exit code 255 even though the Sunbeam control plane and earlier
+validation profiles were healthy. The pipeline then reports the step as failed, but the failure is
+transport loss between the runner and the virtual MAAS environment — not a confirmed Tempest or
+OpenStack validation failure.
+
+**Evidence to look for:**
+- `generated/sshtest.txt`: periodic `infra1` successes followed by SSH errors such as
+  `kex_exchange_identification: Connection closed by remote host`
+- `generated/lastlines.txt` / GitHub failed log: `quick` and `smoke` both show `Failed: 0`
+- The refstack command starts, then later raises `CalledProcessError` exit status 255 from
+  `products/sqa_common/helpers.py:run_cmd`
+- Expected `validation_refstack_*.log` may be missing from Swift because the runner lost access
+  before later collection/copy steps could retrieve it
+
+**Timeline check:**
+1. Confirm the last successful `sshtest.txt` probe timestamp
+2. Confirm the probe failure occurs before or during the refstack SSH window
+3. Treat any MAAS log collection after the last successful tunnel probe as irrelevant to this run
+
+**Fix candidates:**
+1. Make the workflow fail explicitly on tunnel-loss detection before starting another validation profile
+2. Add retry/reconnect logic around `run_remote_command()` when SSH exits 255 on `virtual_maas`
+3. Persist validation logs directly on the runner as each profile finishes so a later tunnel loss does not hide refstack results
+
 ---
 
 _Add more patterns below as they are discovered._
 
 ## Notes
 
-- This step runs on `tor3-sqa-shared_maas` substrates — no MAAS logs are available
+- This step can run on `shared_maas` or `virtual_maas`; if the substrate is `virtual_maas`, check `generated/sshtest.txt` first because SSH tunnel loss can masquerade as a validation failure
 - Validation commands are executed via SSH on the bootstrap node
 - A non-zero exit code from `sunbeam validation` raises `subprocess.CalledProcessError`
   in `test_with_validation_feature.py`, which propagates as the step failure
@@ -331,3 +370,8 @@ _Add more patterns below as they are discovered._
   "UpdatePolicyMaps for all endpoints" (triggered by tempest-0 pod at 15:22:35), new
   floating IPs become unreachable; test-instance FIP created before the update worked;
   all Tempest FIPs after update failed; from run 23847613242 (UUID 03618294, dh1_j9_1, main).
+- **v1.6** (2026-05-25): Added Pattern 4 (`virtual_maas` SSH tunnel drops during validation)
+  from run 26208199607 (UUID 7862b0c0-1e97-4c96-9d50-abf1f14a645b, cluster_1): `quick` and
+  `smoke` both passed with `Failed: 0`, but the outer SSH session to the bootstrap node died
+  during `sunbeam validation run refstack`; `generated/sshtest.txt` showed the last successful
+  probe at 09:53:38 UTC followed by `kex_exchange_identification: Connection closed by remote host`.

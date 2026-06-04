@@ -86,6 +86,8 @@ reachable.
 
 **First observed:** run 23688090524 (UUID 6e7c84f2, tor3-sqa-shared_maas dh1_j8_1, branch main, 2026-03-28)
 
+**Confirmed again:** run 26644918393 (UUID f34d99dd-687b-4324-961b-2cdc1ce10bac, tor3-sqa-testflinger cluster_3, branch main, 2026-05-29). In this occurrence, `sunbeam launch` returned `ubuntu@10.242.4.191`, Neutron associated that floating IP to port `ac1bbca9-d65b-4cd3-83e0-f8a32cce0a69`, and Nova recorded `network-vif-plugged` events for instance `7ce0d1b2-ff72-4289-942a-3224c7caf851` on `jasperoid.maas`, yet all 30 SSH probes from bootstrap node `octopot.maas` still failed with `No route to host`.
+
 ---
 
 ### Pattern 2: VM never reached ACTIVE (Nova BUILD timeout)
@@ -118,7 +120,7 @@ does not indicate the cluster was actually unconfigured — `sunbeam_deploy`
 completed successfully immediately before this step.
 
 **Evidence to look for:**
-- GitHub Actions log: `Timeout waiting for Server:<id> to transition to ACTIVE`,
+- GitHub Actions log: `Timeout waiting for Server:<nova-server-id> to transition to ACTIVE`,
   STDOUT is `b''` (grep for `ubuntu@` never matched)
 - `juju_status_openstack.txt`: check if any nova-compute unit is in `error` state
 - `pods_openstack_logs.tgz` → `logs-openstack-nova-compute-*.txt`: search for
@@ -126,6 +128,75 @@ completed successfully immediately before this step.
 
 **First observed:** run 24664528578 (UUID a44c1e26-624b-4dbc-84c9-d6f14dce8ce1,
 tor3-sqa-testflinger cluster_2, branch main, 2026-04-20)
+
+---
+
+### Pattern 3: Instance create succeeded, but later Nova status poll returned 504 while neutron was flapping
+
+**Symptom:**
+```
+Instance creation request failed: HttpException: 504: Server Error for url:
+http://<public-openstack-ip>:80/openstack-nova/v2.1/servers/<server-id>,
+504 Gateway Timeout: The gateway did not receive a timely response
+Error: Unable to request new instance. Please run `sunbeam configure` first.
+```
+The command still exits with empty stdout (`b''`), so `launch_vm.py` never reaches
+its SSH retry loop.
+
+**Root cause:** The initial `POST /servers` succeeded and Nova began building the
+instance, but a later poll of `GET /servers/<server-id>` through the public
+Traefik/Nova path timed out. In the same window, `neutron-2` was unhealthy:
+`kubectl_get_pod.txt` showed `neutron-2` at `1/2 Running`, the neutron charm kept
+firing `neutron-server-pebble-check-failed`/`recovered`, and `traefik-public`
+reported repeated health-check timeouts against `neutron-2:9696/healthcheck`.
+This points to transient OpenStack control-plane instability during launch rather
+than a missing Sunbeam configuration.
+
+**Evidence to look for:**
+- GitHub Actions log: 504 on `GET /openstack-nova/v2.1/servers/<server-id>`
+- Nova pod logs: `POST /openstack-nova/v2.1/servers` returned `202`, proving the
+  create request was accepted
+- Nova pod logs: later `network-vif-plugged` events for the same instance show
+  Neutron was still wiring the VM on a specific host
+- `kubectl_get_pod.txt`: `neutron-2` degraded (`1/2 Running`)
+- `logs-openstack-traefik-public-*.txt`: repeated `Client.Timeout exceeded while
+  awaiting headers` for `neutron-2` health checks in the failure window
+
+**First observed:** run 26309147742 (UUID 3a40980c-7461-46e7-b0a2-8eaaa707e53e,
+tor3-sqa-testflinger cluster_1, branch aipoc, 2026-05-23)
+
+---
+
+### Pattern 4: Runner-side SSH session disconnected, but remote `sunbeam launch` continued and succeeded
+
+**Symptom:**
+```
+DEBUG - [localhost]: ssh -t ... solqa-shared-maas-server-10.maas -- TERM=dumb sunbeam launch ubuntu -n test-instance '|' grep '"ubuntu@"'
+ERROR - [localhost] Command failed: ssh ... returned non-zero exit status 255.
+STDOUT: b''
+STDERR: Pseudo-terminal will not be allocated because stdin is not a terminal.
+```
+The GitHub Actions step fails about 16 seconds after starting the SSH command, before
+`launch_vm.py` reaches its own 30-attempt SSH-to-VM loop.
+
+**Root cause:** The failure is a false negative in the runner-side transport/wrapping,
+not an OpenStack launch failure. On the bootstrap node, `auth.log` shows the runner's
+SSH client connected successfully and then **disconnected by user** at the exact failure
+moment. However, the bootstrap node's own Sunbeam CLI log shows the same `sunbeam launch`
+command kept running after that disconnect: Nova accepted the create request, the server
+reached `ACTIVE`, and Neutron associated floating IP `10.243.37.136`. The runner failed
+because the SSH session/piped `grep "ubuntu@"` wrapper exited early, so the pipeline
+never saw the eventual success output.
+
+**Evidence to look for:**
+- GitHub Actions log: `ssh ... sunbeam launch ... | grep "ubuntu@"` exits `255` with empty stdout
+- Bootstrap `var/log/auth.log`: `Accepted publickey` followed by `Received disconnect ... disconnected by user`
+- Bootstrap `home/ubuntu/snap/openstack/common/logs/sunbeam-<timestamp>.log`: `POST /openstack-nova/v2.1/servers` returns `202`
+- Same Sunbeam log: server reaches `ACTIVE`, gets fixed IP, then floating IP is created and associated
+- Neutron pod logs: floating IP association succeeds for the same server/port after the runner has already failed
+
+**First observed:** run 26401300048 (UUID b0948bbd-e549-4004-8668-993513adf7b0,
+ tor3-sqa-shared_maas dh1_j8_2, branch main, openstack snap rev 1004, 2026-05-26)
 
 ---
 
@@ -146,3 +217,6 @@ tor3-sqa-testflinger cluster_2, branch main, 2026-04-20)
 
 - **v1.0** (2026-03-31): Initial version — Pattern A (No route to host) from run 23688090524 (UUID 6e7c84f2, tor3-sqa-shared_maas dh1_j8_1)
 - **v1.1** (2026-04-21): Added Pattern B — Nova BUILD timeout (VM never reached ACTIVE); from run 24664528578 (UUID a44c1e26, tor3-sqa-testflinger cluster_2, main, 2026-04-20)
+- **v1.2** (2026-05-25): Added Pattern C — create request and VIF plug succeeded, but later `GET /servers/<id>` returned 504 while `neutron-2` health checks were timing out behind Traefik; from run 26309147742 (UUID 3a40980c-7461-46e7-b0a2-8eaaa707e53e, tor3-sqa-testflinger cluster_1, branch aipoc)
+- **v1.4** (2026-06-02): Confirmed Pattern A on `tor3-sqa-testflinger` / `cluster_3` — `sunbeam launch` returned `ubuntu@10.242.4.191`, Neutron associated floating IP `10.242.4.191` to port `ac1bbca9-d65b-4cd3-83e0-f8a32cce0a69`, and Nova recorded `network-vif-plugged` for instance `7ce0d1b2-ff72-4289-942a-3224c7caf851` on `jasperoid.maas`, but all 30 SSH probes from bootstrap node `octopot.maas` failed with `No route to host`; from run 26644918393 (UUID f34d99dd-687b-4324-961b-2cdc1ce10bac, branch main, 2026-05-29)
+- **v1.3** (2026-05-27): Added Pattern D — runner-side SSH session/piped `grep "ubuntu@"` exited 255 and disconnected by user, but bootstrap-side `sunbeam launch` continued, created server `1de70608-65f8-44a7-9a04-13e26c7dc19e`, reached `ACTIVE`, and associated floating IP `10.243.37.136`; from run 26401300048 (UUID b0948bbd-e549-4004-8668-993513adf7b0, tor3-sqa-shared_maas dh1_j8_2, branch main, openstack rev 1004)

@@ -127,7 +127,7 @@ unit-mysql-1 ERROR    hook "certificates-relation-joined" failed: exit status 1
 
 ---
 
-### Pattern 2: juju wait-for 60m timeout — mysql/2 stuck "waiting for machine" (Juju agent never connected)
+### Pattern 2: juju wait-for 60m timeout — Juju agent never connected (Nova ACTIVE, machine Juju `pending`)
 
 **Symptom (GitHub Actions log):**
 ```
@@ -147,32 +147,79 @@ Machine  State    Address        Inst id (Nova)    Message
 ```
 
 The Nova instance exists (has inst_id, address, Nova status `ACTIVE`) but the Juju machine
-state is `pending`. Unit mysql/2 and its filesystem storage remain pending the entire 60 minutes.
+state is `pending`. Unit and its storage remain pending the entire 60 minutes.
+
+This pattern has also been observed on auxiliary machines (`self-signed-certificates` and
+`data-integrator`, both `ubuntu@24.04`) in run ac4e7f36, while the three mysql machines
+(`ubuntu@22.04`) all provisioned successfully.
 
 **Distinguishing from the mysqld socket race pattern:**
 - **This pattern**: unit in `waiting / allocating`, machine in Juju `pending` — agent never connected
 - **Socket race pattern**: unit in `maintenance / Setting up cluster node` — agent *did* connect but charm hook failed
 
-**Root cause:** The Nova VM for `mysql/2` was provisioned successfully, but the Juju agent
-inside the VM never connected to the controller. The cloud-init bootstrap (which installs and
-starts the juju agent) failed silently on that particular VM. All other machines connect within
-~5 minutes of becoming Nova `ACTIVE`; a machine that never enters the instancepoller "long poll
-group" is a reliable indicator that its agent never came up.
+**⚠️ Key diagnostic signal — check console log immediately:**
+```bash
+openstack console log show <inst_id>
+```
 
-**Evidence to look for:**
+Look for these specific cloud-init messages:
+```
+Used fallback datasource         ← ROOT CAUSE: cloud-init fell back to NoCloud
+ci-info: no authorized SSH keys  ← user-data (juju bootstrap) was never executed
+```
+
+If `Used fallback datasource` appears in the console log, **stop and attribute the bug to
+`cloud-init` or the Ubuntu image**, NOT to Juju. This is the definitive root cause signal.
+Marvin agents have historically mistaken this message as benign — it is not.
+
+**Root cause: OVN metadata proxy race condition (confirmed by live investigation)**
+
+This Sunbeam OpenStack environment:
+- Does **not** set `force_config_drive` — VMs rely entirely on the IMDS (Instance Metadata
+  Service) at `169.254.169.254` to receive user-data (the Juju bootstrap script)
+- Uses `neutron-ovn-metadata-agent` running on each hypervisor with a per-network HAProxy
+  namespace that proxies metadata requests to `nova-api-metadata`
+
+Race mechanism:
+1. Nova marks the instance `ACTIVE` and signals the hypervisor
+2. **Asynchronously**: OVN notifies the metadata agent to create the HAProxy namespace for
+   the instance's network (takes seconds to complete)
+3. The VM boots and cloud-init begins datasource detection, querying 169.254.169.254
+4. **If cloud-init queries BEFORE the HAProxy namespace is ready**: connection is refused
+5. cloud-init falls back to the NoCloud/fallback datasource
+6. user-data (Juju bootstrap script) is never executed; network not configured; Juju agent
+   never starts
+
+Ubuntu 24.04 has a shorter/stricter datasource detection window than Ubuntu 22.04, making
+it far more susceptible to this race. This explains why:
+- All three `ubuntu@22.04` mysql machines succeed (tolerant of the timing window)
+- Both `ubuntu@24.04` auxiliary machines fail (strict detection window, fall through faster)
+
+**Measured timing from live system:**
+- Port binding → HAProxy namespace ready: a few seconds (usually before VM's cloud-init)
+- First `user_data` response latency: up to 2.2 seconds (cold nova-api-metadata cache)
+- OVN SB connection drops (`ssl:<ovn-relay>:6642: receive error`) observed on hypervisors —
+  can delay the metadata agent's port binding notification, extending the race window
+
+**Intermittent nature:**
+- On a lightly loaded or fast OpenStack the race window closes before cloud-init detects it
+- On a slow/loaded OpenStack (e.g., during concurrent heavy deployments) the OVN plumbing
+  is slower, and the race window is wider → 24.04 falls through, 22.04 tolerates it
+
+**Evidence to look for in crashdump:**
 - `admin-mysql-<id>.log`: `started machine N` and `status changed to {"running" "ACTIVE"}` for
   the affected machine, but NO subsequent "moving machine N to long poll group" entry (all other
-  machines get this entry within ~5 minutes of becoming ACTIVE)
-- `logsink.log`: No entries with `machine-N` as the source for the mysql model UUID — the agent
-  never forwarded any logs to the controller
-- `juju status`: affected machine state is `pending` despite having a Nova inst_id and IP;
-  corresponding unit shows `waiting / allocating`; storage shows `pending`
+  machines get this entry within ~3–5 min of becoming ACTIVE)
+- `logsink.log`: No entries with `machine-N` as the source for the affected model UUID — the
+  agent never forwarded any logs to the controller; audit log: zero API connections from that machine
 
-**Why further diagnosis is impossible from available logs:**
-The Juju crashdump (collected from the controller) confirms the pattern from the controller
-side — but the root cause lives inside the VM. Nova console logs for the affected instance
-(`openstack console log show <inst_id>`) would show cloud-init output and reveal exactly
-where the bootstrap failed; these are not currently collected by the pipeline.
+**Evidence to look for in console log (run `openstack console log show <inst_id>`):**
+- `Used fallback datasource` (confirms IMDS was unavailable/timing out at cloud-init detection time)
+- `ci-info: no authorized SSH keys` (user-data never ran → no SSH keys injected)
+- `Cloud-init finished` without any WARNING or ERROR lines at Python log level
+  (cloud-init considers NoCloud/fallback a non-error completion, masking the actual failure)
+- SSH to the instance's IP from the runner or a peer VM in the same subnet → timeout
+  (sshd never started because network config from user-data never ran)
 
 **Example (run 23343435826, UUID 57cc163c):**
 ```
@@ -198,6 +245,22 @@ Machine 2: pending, ACTIVE (Nova)
 # juju status at timeout:
 mysql/1  waiting   allocating  1  192.168.1.29   waiting for machine
 Machine 1: pending, ACTIVE (Nova), inst 4fce3bdf-8173-4cc9-80b5-2c7b4ce72f42
+```
+
+**Example (run 26339137164, UUID ac4e7f36, tor3-sqa-sunbeam cluster_3, 2026-05-23):**
+```
+# Machines 3 (self-signed-certificates, ubuntu@24.04, inst b9873a00-...)
+#          4 (data-integrator,          ubuntu@24.04, inst 9e99e84c-...)
+# Both provisioned ACTIVE at ~18:13–18:14Z
+# Machines 0/1/2 (mysql, ubuntu@22.04) all moved to long poll within ~3 min of ACTIVE
+# Machines 3/4: zero log entries in logsink.log; zero API connections in audit log
+# Nova console logs (checked by live Marvin agent): "Used fallback datasource" + "ci-info: no authorized SSH keys"
+# Both instances: SSH to port 22 timed out from runner AND from peer VM in same subnet
+# juju wait-for timed out at 19:11:38Z (60m after deploy start at ~18:11Z)
+#
+# Confirmed (live investigation): force_config_drive NOT set; OVN metadata proxy architecture
+# (neutron-ovn-metadata-agent + per-network HAProxy) confirmed; OVN SB drops observed on hypervisors
+# Bug attribution: cloud-init / ubuntu-noble image, NOT juju
 ```
 
 ---
@@ -344,3 +407,4 @@ _Add more patterns below as they are discovered._
 - **v1.3** (2026-05-04): Second occurrence of Juju agent never connected confirmed (run 25109744547, UUID 2edfd3e6, mysql/1); added crashdump evidence showing "never moved to long poll group" as the controller-side confirmation; updated root cause note to reference Nova console log as the missing diagnostic
 - **v1.4** (2026-05-04): Added Pattern C — Nova `oslo_db.exception.DBConnectionError` (HTTP 500) blocks provisioning of auxiliary VMs (self-signed-certificates, data-integrator); 11 retries exhausted over ~5-min window; AZ becoming "not valid" signals nova-compute restart; mysql TLS blocked as cascade; from run 25166260474 (UUID aa136dd9, tor3-sqa-sunbeam cluster_1, 2026-04-30)
 - **v1.5** (2026-05-18): Added Pattern 4 — ops-framework defer deadlock (mysql/1: circular TLS↔cluster-metadata dependency) + blocking `join_innodb_cluster` call (mysql/2: `database-peers-relation-changed` hook never returns); no hook exit-1 failures; same root cause as Pattern 1 (mysql-operators#189) but graceful deferral in place of exception; from run 25964063826 (UUID 6424e6d7, tor3-sqa-sunbeam cluster_1, main, 2026-05-16)
+- **v1.6** (2026-05-26): Pattern 2 updated with confirmed root cause from live investigation of UUID ac4e7f36 (run 26339137164): OVN metadata proxy race on ubuntu@24.04 — `force_config_drive` not set; cloud-init uses IMDS via `neutron-ovn-metadata-agent` + per-network HAProxy; when metadata not ready at boot (OVN plumbing latency, OVN SB drops), ubuntu@24.04 cloud-init falls back to NoCloud (shorter detection window vs 22.04); `Used fallback datasource` in Nova console log is the definitive signal; Juju controller is innocent bystander; SSH to 169.254.169.254 confirmed routed through OVN → haproxy → nova-api-metadata on hypervisor; user_data latency measured at 2.2s on cold cache; added console log diagnostic steps and example.

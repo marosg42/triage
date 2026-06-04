@@ -895,6 +895,79 @@ tor3-sqa-virtual_maas cluster_2, MAAS 3.5/beta rev 41917, branch main, 2026-05-0
 
 ---
 
+### Pattern 13: Runner-side `maas` CLI hangs after successful API 200 responses → `compose_vms` false failure
+
+**Symptom (GitHub Actions log):**
+```
+2026-05-25-14:35:03 root DEBUG [localhost]: maas root machines read
+... 4 hours of silence ...
+subprocess.CalledProcessError: Command '['maas', 'root', 'machines', 'read']' died with <Signals.SIGKILL: 9>.
+##[error]Process completed with exit code 1.
+```
+
+The failure occurs inside `maas:compose_vms` after `juju-1`, `sunbeam-1`, `juju-2`, and
+`sunbeam-2` have already been composed and tagged.
+
+**Root cause:** The MAAS API stayed healthy, but the **runner-side snapped `maas` CLI**
+stalled locally after receiving successful HTTP responses. The key proof is that mienfoo's MAAS
+logs show the supposedly hanging requests completing with HTTP 200 in a few seconds, while the
+runner-side CLI never returned any stdout/stderr and was eventually killed. Later diagnostics in
+the same job reproduced the behavior for small endpoints too (`version read`, `rack-controllers
+read`, `machines read hostname=quilava`): all timed out locally, yet mienfoo logged matching
+HTTP 200 responses immediately. This makes the failure a **false negative in the client on the
+runner**, not a MAAS server outage, DB stall, or bad machine state.
+
+A same-day runner snap refresh is a strong clue, but not fully proven as the direct trigger:
+`maas` on the runner was revision 41649 with `refresh-date: today at 13:48 UTC`, and the CLI's
+profile DB lived under `/home/ubuntu/snap/maas/41649/.maascli.db`. The available artifacts do
+not expose the exact blocked code path after the HTTP response returns.
+
+**Distinguishing evidence:**
+
+```bash
+# 1. The hung FCE call's API request actually completed successfully
+# Expect: GET /MAAS/api/2.0/machines/ ... --> 200 OK at ~14:35:06
+
+grep "2026-05-25T14:35:0[3-6]:" <work_dir>/maas-logs/10.241.144.3/var/log/syslog \
+  | grep "/MAAS/api/2.0/machines/"
+
+# 2. Later diagnostic MAAS CLI calls also hang locally, but server logs show 200 responses
+# Expect: version/rackcontrollers/machines?hostname requests at 18:48 all return 200 in syslog
+
+grep "2026-05-25T18:48:" <work_dir>/maas-logs/10.241.144.3/var/log/syslog \
+  | grep "/MAAS/api/2.0/version/\|/MAAS/api/2.0/rackcontrollers/\|/MAAS/api/2.0/machines/?hostname=quilava"
+
+# 3. Snapshot proves the composed VMs existed and were already Ready despite the failure
+python3 - <<'PY'
+import glob, json
+path = glob.glob('<work_dir>/<uuid>/generated/marvin-the-happy-bot/snapshot-*/maas/machines.json')[0]
+arr = json.load(open(path))
+for name in ['juju-1', 'sunbeam-1', 'juju-2', 'sunbeam-2']:
+    m = next(x for x in arr if x['hostname'] == name)
+    print(name, m['status_name'], m['system_id'])
+PY
+```
+
+**Key timeline (run 26388147932 / UUID 59a74d0f-d147-4b31-969c-d1c24a20259a):**
+- 13:48 UTC — runner `maas` snap revision 41649 refreshed
+- 14:32–14:34 — `juju-1`, `sunbeam-1`, `juju-2`, `sunbeam-2` composed successfully
+- 14:35:03 — FCE starts `maas root machines read`
+- 14:35:06 — mienfoo logs `GET /MAAS/api/2.0/machines/` → `200 OK` (429734-byte response)
+- 18:35:03 — runner kills the still-stuck CLI process with SIGKILL
+- 18:48 — ad-hoc `maas root version read`, `rack-controllers read`, and `machines read hostname=quilava` all hang locally; mienfoo logs matching 200 responses immediately
+
+**What it is NOT:**
+- Not Pattern J (`machines create` server-side hang on PowerOnWorkflow): here the server replied 200
+- Not a MAAS API VIP/network outage: `curl http://10.241.144.5:80/MAAS/api/2.0/version/` returned 200, ping and TCP/80 succeeded
+- Not a bad VM state: snapshot `machines.json` shows `juju-1`, `sunbeam-1`, `juju-2`, and `sunbeam-2` all `Ready`
+
+**Recommendations:**
+1. Add an explicit timeout/retry wrapper around MAAS CLI calls in FCE and log when the server already returned 200 but the client stayed stuck.
+2. Prefer direct MAAS API probes (or a secondary validation path) before failing the whole layer on a stuck CLI subprocess.
+3. Investigate the runner-side snapped `maas` CLI on rev 41649, especially post-response hangs after the 2026-05-25 13:48 refresh.
+
+---
+
 ## Version History
 
 - **v1.0** (2026-03-27): Initial version — AppArmor virsh pkttyagent denial pattern from
@@ -914,3 +987,42 @@ tor3-sqa-virtual_maas cluster_2, MAAS 3.5/beta rev 41917, branch main, 2026-05-0
 - **v1.11** (2026-04-10): Clarified Pattern A substrate reliability. Analysis of 12 reports mentioning AppArmor/pkttyagent showed: Pattern A is a genuine root cause on dedicated_maas (confirmed in 5dd2bf63, fde2213c), but on virtual_maas the same denials appear in ALL runs including passing ones (144+ occurrences/run) and are routinely a red herring. Multiple virtual_maas failure analyses (1078296e, 3830828c, 8e226262, 473c2885) explicitly confirmed AppArmor denials as benign with a different actual root cause. Do not conclude Pattern A on virtual_maas from denials alone.
 - **v1.13** (2026-05-06): Added Pattern K — HAProxy on infra2 restarted (SIGTERM, exit 143) at 05:48:11 UTC, dropping in-flight `vm-host refresh 2` API connection; MAAS CLI returns exit code 2 with "Remote end closed connection without response"; FCE has no retry for `refresh_vmhost()`; pacemaker managing haproxy-clone; syslog absent so exact trigger unconfirmable; from run 25417149963 (UUID c9e24a7e, tor3-sqa-virtual_maas cluster_2, MAAS 3.5/beta rev 41917, 2026-05-06).
 - **v1.14** (2026-05-08): Added Pattern L — internal mirror catalog lists 20260430 jammy/amd64 images but 13 individual files return HTTP 404; MAAS Temporal `download-bootresource` workflows retry indefinitely (reach attempt 38+ in 27 min); `is_importing` stuck true; FCE `wait_for_not_boot_resource_importing` times out; from run 25545041966 (UUID 6db10053, tor3-sqa-virtual_maas cluster_2, MAAS 3.5.12 snap rev 41917, 2026-05-08). Distinct from Pattern F (mirror unreachable) and G (incomplete catalog deletes noble image).
+- **v1.15** (2026-05-27): Added Pattern 13 — runner-side snapped `maas` CLI hangs after successful HTTP 200 responses during `maas:compose_vms`; FCE blocks on `maas root machines read` for exactly 4 hours until SIGKILL, but mienfoo logs show the `GET /MAAS/api/2.0/machines/` request completed in 3s and later diagnostic `version/rackcontrollers/machines?hostname=quilava` calls also returned 200 while the local CLI still timed out; snapshot confirms `juju-1`, `sunbeam-1`, `juju-2`, and `sunbeam-2` were already `Ready`; from run 26388147932 (UUID 59a74d0f-d147-4b31-969c-d1c24a20259a, tor3-sqa-dedicated_maas dh1_j6, branch aipoc, runner `maas` snap rev 41649 refreshed at 13:48 UTC).
+
+### Pattern 14: Intel IOMMU (DMAR) DMA mapping bug corrupts bcache reads → Deterministic segfaults
+
+**Symptom (GitHub Actions log):**
+```
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x1 pc=0x63f3dc8a8860]
+
+goroutine 1 [running]:
+internal/godebug.init.0()
+	/usr/lib/go-1.22/src/internal/godebug/godebug.go:197
+...
+root WARNING snap install maas --channel 3.7/stable failed. Attempting to retry in 60 seconds.
+```
+The `snap install maas` command repeatedly panics with a nil pointer dereference inside the early Go initialization (`internal/godebug.init.0()`) at the exact same instruction offset (e.g. `...860`).
+
+**Root cause:** An Intel IOMMU (DMAR) mapping bug interacts with the kernel's `bcache_writebac` thread on specific hardware (e.g. HP ProLiant DL320e Gen8) when using an NVMe caching device. The IOMMU fails to correctly map DMA page table entries (`DMA PTE for vPFN ... already set`). Because DMA mappings are corrupted, block transfers from the storage device into RAM place garbage data into the page cache.
+This causes userspace binaries stored on the root filesystem to be silently corrupted when executed. The binaries read the corrupted pages from the cache and execute garbage instructions, leading to deterministic segfaults.
+
+**Distinguishing evidence:**
+1. **DMAR errors in syslog at boot:** Immediately after `bcache` registers the NVMe cache, `syslog` logs `DMAR: ERROR: DMA PTE for vPFN 0xf1f80 already set` and a kernel warning at `__domain_mapping`. The PID is `bcache_writebac`.
+2. **Multiple binaries segfault at deterministic offsets:** The node's `syslog` shows other userspace applications segfaulting deterministically (e.g. `ModemManager` repeatedly segfaulting at offset `...595` in `ld-linux.so`, `snapd` failing with `INVALIDARGUMENT`).
+3. **Hardware specific:** The issue only affects nodes with the specific IOMMU hardware/bug (e.g., DL320e Gen8), while identical `snap install maas` commands on sibling nodes (e.g. DL360e Gen8) running the same kernel succeed.
+
+**Evidence to look for:**
+```bash
+# 1. Look for DMAR errors and bcache warnings in syslog
+grep -A2 "DMAR: ERROR: DMA PTE" <work_dir>/maas-logs/<ip>/var/log/syslog
+# Expect: WARNING: CPU: X PID: Y at drivers/iommu/intel/iommu.c:2227 __domain_mapping
+
+# 2. Check for deterministic segfaults in other services
+grep "segfault" <work_dir>/maas-logs/<ip>/var/log/syslog
+# Expect: ModemManager segfaulting repeatedly at identical instruction pointer offsets
+```
+
+**Remediation:** Pass `intel_iommu=off` or `intel_iommu=pt` as a kernel parameter via MAAS for the affected node, or disable `bcache` if IOMMU is strictly required on that hardware.
+
+**From run:** 26719477705 (UUID 5eb8d383-dd43-47da-9175-481d8e62aa89, tor3-sqa-dedicated_maas dh1_j2, Ubuntu 24.04 noble, linux 6.8.0-124-generic, node `anahuac` / HP ProLiant DL320e Gen8).
