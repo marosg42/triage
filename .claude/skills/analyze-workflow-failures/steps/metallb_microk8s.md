@@ -35,14 +35,14 @@ contain syslog entries from the MicroK8s nodes.
 ```bash
 # Find the primary error
 grep -E "unexpected EOF|add-model|create_model|juju-system" \
-  /tmp/<uuid>/generated/metallb_microk8s/log.txt
+  <work_dir>/<uuid>/generated/metallb_microk8s/log.txt
 
 # Check MicroK8s unit health at failure time
 grep -E "error|blocked|waiting|maintenance" \
-  /tmp/<uuid>/generated/metallb_microk8s/juju_status_foundations-maas_microk8s.txt
+  <work_dir>/<uuid>/generated/metallb_microk8s/juju_status_foundations-maas_microk8s.txt
 
 # Check which MicroK8s node IP is the API endpoint being hit
-grep "16443" /tmp/<uuid>/generated/metallb_microk8s/log.txt
+grep "16443" <work_dir>/<uuid>/generated/metallb_microk8s/log.txt
 ```
 
 ## Known Failure Patterns

@@ -37,15 +37,15 @@ snapshots.
 
 ```bash
 # Find the timeout error in GitHub Actions log
-grep "timed out waiting\|##\[error\]" /tmp/run_<run_id>_failed.log | grep -i mysql
+grep "timed out waiting\|##\[error\]" <work_dir>/run_<run_id>_failed.log | grep -i mysql
 
 # Check unit states at failure time
-cat /tmp/<uuid>/generated/deploy_charm_mysql/juju_status_foundation-openstack_mysql.txt
+cat <work_dir>/<uuid>/generated/deploy_charm_mysql/juju_status_foundation-openstack_mysql.txt
 
 # Parse unit workload statuses from JSON
 python3 -c "
 import json
-with open('/tmp/<uuid>/generated/deploy_charm_mysql/juju_status_foundation-openstack_mysql.json') as f:
+with open('<work_dir>/<uuid>/generated/deploy_charm_mysql/juju_status_foundation-openstack_mysql.json') as f:
     data = json.load(f)
 for app_name, app in data.get('applications', {}).items():
     for unit_name, unit in app.get('units', {}).items():
@@ -105,9 +105,9 @@ within ~2 minutes, leaving insufficient mysqld startup time).
 
 **How to find the mysql model UUID for log filtering:**
 ```bash
-ls /tmp/crashdump/*/0/baremetal/var/log/juju/models/
+ls <work_dir>/crashdump/*/0/baremetal/var/log/juju/models/
 # Look for admin-mysql-XXXXXX.log — the XXXXXX is a short prefix of the model UUID
-grep "423a8d" /tmp/crashdump/.../logsink.log  # replace with actual prefix
+grep "423a8d" <work_dir>/crashdump/.../logsink.log  # replace with actual prefix
 ```
 
 **Example (run 23343431862, UUID d4685121):**

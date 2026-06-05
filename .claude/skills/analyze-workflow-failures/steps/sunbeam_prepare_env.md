@@ -45,7 +45,7 @@ Infra nodes are typically at `.2`, `.3`, `.4` in the subnet:
 
 Check which node has the relevant service:
 ```bash
-for d in /tmp/maas-logs/*/; do
+for d in <work_dir>/maas-logs/*/; do
   ip=$(basename $d)
   echo -n "$ip: "
   head -1 $d/var/log/syslog 2>/dev/null | grep -oP 'infra\d+' || echo "(no syslog)"
@@ -57,26 +57,26 @@ done
 ```bash
 # Find the primary MAAS API error
 grep -h "maasserver_routable_pairs\|relation.*does not exist\|Failed to render preseed" \
-  /tmp/maas-logs/*/var/log/syslog | sort | head -20
+  <work_dir>/maas-logs/*/var/log/syslog | sort | head -20
 
 # Check snap refresh events around failure
 grep -h "auto-refresh\|post-refresh\|taskrunner\|snap.*41404\|snap.*40614" \
-  /tmp/maas-logs/*/var/log/syslog | sort
+  <work_dir>/maas-logs/*/var/log/syslog | sort
 
 # Find AppArmor denials during hook
 grep -h "DENIED.*post-refresh\|post-refresh.*DENIED\|gss/mech" \
-  /tmp/maas-logs/*/var/log/syslog | sort
+  <work_dir>/maas-logs/*/var/log/syslog | sort
 
 # Check MAAS API backend health
-grep -h "maas-api" /tmp/maas-logs/*/var/log/haproxy.log | sort
+grep -h "maas-api" <work_dir>/maas-logs/*/var/log/haproxy.log | sort
 
 # Get clean timeline around a window (replace timestamp prefix)
-grep -h "2026-03-22T01:0" /tmp/maas-logs/*/var/log/syslog \
+grep -h "2026-03-22T01:0" <work_dir>/maas-logs/*/var/log/syslog \
   | grep -v "kernel\|audit\|apparmor\|named\|maas-machine\|#011\|twisted\|django\|maasserver\|provisioning" \
   | sort
 
 # Confirm missing DB table
-grep "maasserver_routable_pairs" /tmp/maas-logs/*/var/snap/maas/common/log/dump.dmp
+grep "maasserver_routable_pairs" <work_dir>/maas-logs/*/var/snap/maas/common/log/dump.dmp
 ```
 
 ## Known Failure Patterns
@@ -96,10 +96,10 @@ was never created.
 **Quick check:**
 ```bash
 # Was a snap refresh recent?
-grep -h "auto-refresh\|post-refresh" /tmp/maas-logs/*/var/log/syslog | sort | tail -20
+grep -h "auto-refresh\|post-refresh" <work_dir>/maas-logs/*/var/log/syslog | sort | tail -20
 
 # How long did the hook run?
-grep -h "post-refresh" /tmp/maas-logs/*/var/log/syslog | sort
+grep -h "post-refresh" <work_dir>/maas-logs/*/var/log/syslog | sort
 # Hook <30s = Variant B (silent failure), exactly 10m = Variant A (killed/rolled back)
 ```
 

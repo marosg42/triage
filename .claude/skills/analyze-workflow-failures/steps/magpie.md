@@ -36,16 +36,16 @@ Controller HA nodes typically run at IPs like `10.241.144.81–83` (virtual_maas
 
 ```bash
 # Find the primary juju deploy error in FCE log
-grep -i "error\|failed\|cannot add" /tmp/<uuid>/generated/magpie/log.txt
+grep -i "error\|failed\|cannot add" <work_dir>/<uuid>/generated/magpie/log.txt
 
 # Check which juju deploy calls succeeded vs failed
-grep "Deploying magpie\|Command failed\|cannot add" /tmp/<uuid>/generated/magpie/log.txt
+grep "Deploying magpie\|Command failed\|cannot add" <work_dir>/<uuid>/generated/magpie/log.txt
 
 # Check for snap refreshes on infra hosts around the failure window
-grep "2026-<date>T<HH>:" /tmp/maas-logs-*/*/var/log/syslog | grep -i "snap\|refresh\|juju"
+grep "2026-<date>T<HH>:" <work_dir>/maas-logs-*/*/var/log/syslog | grep -i "snap\|refresh\|juju"
 
 # Check for VM-level events on infra hosts
-grep "2026-<date>T<HH>:" /tmp/maas-logs-*/*/var/log/syslog \
+grep "2026-<date>T<HH>:" <work_dir>/maas-logs-*/*/var/log/syslog \
   | grep -v "kernel\|audit\|apparmor\|named\|#011\|maas\|temporal\|haproxy\|nginx"
 ```
 

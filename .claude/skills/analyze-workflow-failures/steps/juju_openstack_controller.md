@@ -28,18 +28,18 @@ All evidence comes from `log.txt` and the GitHub Actions run log.
 ```bash
 # Find the primary error in the FCE log
 grep -n "ERROR\|Exception\|CalledProcessError\|returned non-zero" \
-  /tmp/<uuid>/generated/juju_openstack_controller/log.txt
+  <work_dir>/<uuid>/generated/juju_openstack_controller/log.txt
 
 # Find the enable_ha sub-step start and failure
 grep -n "enable_ha\|juju bind\|juju spaces\|not in space" \
-  /tmp/<uuid>/generated/juju_openstack_controller/log.txt
+  <work_dir>/<uuid>/generated/juju_openstack_controller/log.txt
 
 # Show bootstrap completion and enable_ha transition
 grep -n "Finished step\|Starting step" \
-  /tmp/<uuid>/generated/juju_openstack_controller/log.txt
+  <work_dir>/<uuid>/generated/juju_openstack_controller/log.txt
 
 # In GitHub Actions failed log
-grep -n "juju bind\|not in space\|enable_ha" /tmp/run_<run_id>_failed.log
+grep -n "juju bind\|not in space\|enable_ha" <work_dir>/run_<run_id>_failed.log
 ```
 
 ## Known Failure Patterns

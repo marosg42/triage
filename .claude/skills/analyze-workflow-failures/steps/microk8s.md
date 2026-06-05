@@ -31,7 +31,7 @@ Objects stored under `<uuid>/generated/microk8s/` that are useful for diagnosing
 
 ```bash
 # Track machine state transitions in juju-wait verbose output
-grep -n "Machine [0-9] is in\|started\|allocating\|executing\|workload" /tmp/run_*_failed.log | head -50
+grep -n "Machine [0-9] is in\|started\|allocating\|executing\|workload" <work_dir>/run_*_failed.log | head -50
 
 # Find when each microk8s machine deployed in MAAS
 grep -a "microk8s-[123]: Status transition" <maas-logs>/10.*/var/log/syslog
@@ -40,7 +40,7 @@ grep -a "microk8s-[123]: Status transition" <maas-logs>/10.*/var/log/syslog
 grep "jujud-machine\|Starting Juju\|nonce\|echo machine" <maas-logs>/10.*/var/log/libvirt/qemu/microk8s-*-serial0.log
 
 # Find first machine down event
-grep -n "Machine [0-9] is in down" /tmp/run_*_failed.log | head -5
+grep -n "Machine [0-9] is in down" <work_dir>/run_*_failed.log | head -5
 
 # Check machine status in final juju status JSON
 python3 -c "

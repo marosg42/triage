@@ -63,7 +63,7 @@ Hook duration: **<30 seconds** = suspicious; real DB migrations take longer.
 
 ### 1. Find the refresh event
 ```bash
-grep -h "auto-refresh\|post-refresh\|41404\|taskrunner" /tmp/maas-logs/*/var/log/syslog | sort
+grep -h "auto-refresh\|post-refresh\|41404\|taskrunner" <work_dir>/maas-logs/*/var/log/syslog | sort
 ```
 
 ### 2. Measure hook duration
@@ -76,7 +76,7 @@ Duration < 30s → Variant B. Duration = 10m0s → Variant A.
 
 ### 3. Find AppArmor denial
 ```bash
-grep -h "DENIED.*post-refresh\|post-refresh.*DENIED" /tmp/maas-logs/*/var/log/syslog | sort
+grep -h "DENIED.*post-refresh\|post-refresh.*DENIED" <work_dir>/maas-logs/*/var/log/syslog | sort
 ```
 Expected line:
 ```
@@ -85,13 +85,13 @@ kernel: audit: ... apparmor="DENIED" operation="open" profile="snap.maas.hook.po
 
 ### 4. Confirm missing table in DB schema
 ```bash
-grep "maasserver_routable_pairs" /tmp/maas-logs/*/var/snap/maas/common/log/dump.dmp
+grep "maasserver_routable_pairs" <work_dir>/maas-logs/*/var/snap/maas/common/log/dump.dmp
 ```
 If no output → table was never created → migration was skipped.
 
 ### 5. Correlate with HAProxy (Variant A only)
 ```bash
-grep -h "maas-api" /tmp/maas-logs/*/var/log/haproxy.log | sort
+grep -h "maas-api" <work_dir>/maas-logs/*/var/log/haproxy.log | sort
 ```
 During rollback, backends cycle DOWN → UP.
 

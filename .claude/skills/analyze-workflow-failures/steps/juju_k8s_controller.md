@@ -30,13 +30,13 @@ No tgz archive for this substrate. All diagnostic information comes from GitHub 
 
 ```bash
 # Find the bootstrap error in GitHub Actions failed log
-grep "invalid reference\|bootstrap.*error\|ERROR.*bootstrap\|failed to bootstrap" /tmp/run_<run_id>_failed.log
+grep "invalid reference\|bootstrap.*error\|ERROR.*bootstrap\|failed to bootstrap" <work_dir>/run_<run_id>_failed.log
 
 # Find the Juju upgrade section
-grep "Switching juju\|switched to the\|refreshed\|add-k8s\|bootstrap" /tmp/run_<run_id>_failed.log | grep -v "##\[group\]\|SUBSTRATE\|TWC\|VAULT"
+grep "Switching juju\|switched to the\|refreshed\|add-k8s\|bootstrap" <work_dir>/run_<run_id>_failed.log | grep -v "##\[group\]\|SUBSTRATE\|TWC\|VAULT"
 
 # Check Kubernetes version and AKS cluster name from k8s_cloud output
-grep "current_kubernetes_version\|cluster-\|Creation complete" /tmp/run_<run_id>_failed.log
+grep "current_kubernetes_version\|cluster-\|Creation complete" <work_dir>/run_<run_id>_failed.log
 ```
 
 ## Known Failure Patterns

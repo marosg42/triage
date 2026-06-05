@@ -30,9 +30,9 @@ Objects stored under `<uuid>/generated/sunbeam/` that are useful for diagnosing 
 
 Extract with:
 ```bash
-mkdir -p /tmp/pods_openstack
-tar -xzf <work_dir>/<uuid>/generated/sunbeam/pods_openstack_logs.tgz -C /tmp/pods_openstack
-ls /tmp/pods_openstack/generated/sunbeam/ | grep vault
+mkdir -p <work_dir>/pods_openstack
+tar -xzf <work_dir>/<uuid>/generated/sunbeam/pods_openstack_logs.tgz -C <work_dir>/pods_openstack
+ls <work_dir>/pods_openstack/generated/sunbeam/ | grep vault
 ```
 
 ## Grep Patterns
@@ -43,13 +43,13 @@ grep -i "vault" <work_dir>/<uuid>/generated/sunbeam/juju_status_openstack.txt
 
 # Find the raft join error on follower nodes
 grep "waiting for unseal\|failed to get raft challenge\|Vault is sealed" \
-    /tmp/pods_openstack/generated/sunbeam/logs-openstack-vault-0.txt | head -20
+    <work_dir>/pods_openstack/generated/sunbeam/logs-openstack-vault-0.txt | head -20
 
 # Check vault-1 (leader) unseal progress — exit status 2 = partial unseal
-grep "exit status" /tmp/pods_openstack/generated/sunbeam/logs-openstack-vault-1.txt
+grep "exit status" <work_dir>/pods_openstack/generated/sunbeam/logs-openstack-vault-1.txt
 
 # Find the timeout in GH Actions log
-grep "wait timed out\|CalledProcessError.*vault.*unseal" /tmp/run_<run_id>_failed.log
+grep "wait timed out\|CalledProcessError.*vault.*unseal" <work_dir>/run_<run_id>_failed.log
 ```
 
 ## Known Failure Patterns
@@ -194,11 +194,11 @@ reason requires pod logs from Swift (`pods_openstack_logs.tgz`).
 **Grep patterns:**
 ```bash
 # Find stuck apps in GH Actions log
-grep "sunbeam_enable_plugins_all" /tmp/run_<run_id>_failed.log | \
+grep "sunbeam_enable_plugins_all" <work_dir>/run_<run_id>_failed.log | \
   grep "Payload container not ready\|Not all relations are ready" | head -10
 
 # Find the observability enable timeout
-grep "sunbeam_enable_plugins_all" /tmp/run_<run_id>_failed.log | \
+grep "sunbeam_enable_plugins_all" <work_dir>/run_<run_id>_failed.log | \
   grep "Enabling observability\|wait timed out\|Command failed.*observability"
 ```
 
@@ -480,6 +480,8 @@ subprocess.CalledProcessError: Command ['ssh', ..., 'sunbeam', 'enable', '-m', '
 
 **First observed:** run 26190744612 (UUID 2532ed1e-77b5-432c-9976-39c61b3946a8, tor3-sqa-virtual_maas cluster_3, branch main, 2026-05-21)
 
+**Second observed:** run 26539853785 (UUID 6e1deb7a-c2b5-4f0f-9a63-90f0223d3397, tor3-sqa-virtual_maas cluster_7, branch main, 2026-05-27)
+
 ---
 
 ### Pattern 12: tls enable false failure — virtual_maas tunnel dropped during the SSH session
@@ -641,6 +643,7 @@ _Add more patterns below as they are discovered._
   Actions logs and Swift pod logs.
 
 ## Version History
+- **v1.16** (2026-06-04): Updated Pattern 11 with another confirmation from run 26539853785 / UUID 6e1deb7a-c2b5-4f0f-9a63-90f0223d3397 on tor3-sqa-virtual_maas cluster_7 — `sunbeam enable telemetry` timed out because `opentelemetry-collector/0` published Loki endpoint data to `openstack-exporter:logging` (relation 229) but failed to publish it to `gnocchi` (relation 247), `horizon` (relation 250), `tempest` (relation 227), `placement`, and `ovn-relay`.
 
 - **v1.0** (2026-04-02): Initial version — Pattern A from run 23878110731 (UUID fd88452f)
 - **v1.1** (2026-04-09): Added Pattern B (vault `update-status` hook failure, run 24181697345 / UUID e15bca12) and Pattern C (observability enable timeout — aodh/gnocchi payload containers not ready, run 24180158005 / UUID e8a7e71d)

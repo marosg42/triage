@@ -37,20 +37,20 @@ WDIR=<work_dir>/<uuid>
 
 # Find the SSH error in GitHub Actions log
 grep "No route to host\|Connection refused\|Could not get the proper response" \
-  /tmp/run_<run_id>_failed.log
+  <work_dir>/run_<run_id>_failed.log
 
 # Count total retry attempts
-grep -c "No route to host\|Connection refused" /tmp/run_<run_id>_failed.log
+grep -c "No route to host\|Connection refused" <work_dir>/run_<run_id>_failed.log
 
 # Find the IP returned by sunbeam launch
-grep "ubuntu@" /tmp/run_<run_id>_failed.log | grep "INFO.*localhost" | head -3
+grep "ubuntu@" <work_dir>/run_<run_id>_failed.log | grep "INFO.*localhost" | head -3
 
 # Check OpenStack charm health at time of failure
 grep -E "error|blocked|waiting" $WDIR/generated/sunbeam/juju_status_openstack.txt
 
 # Search Nova logs for the test instance
-tar -xzf $WDIR/generated/sunbeam/pods_openstack_logs.tgz -C /tmp/openstack-pods/
-grep -l "test-instance\|10\.243\." /tmp/openstack-pods/logs-openstack-nova-*.txt
+tar -xzf $WDIR/generated/sunbeam/pods_openstack_logs.tgz -C <work_dir>/openstack-pods/
+grep -l "test-instance\|10\.243\." <work_dir>/openstack-pods/logs-openstack-nova-*.txt
 ```
 
 ## Known Failure Patterns

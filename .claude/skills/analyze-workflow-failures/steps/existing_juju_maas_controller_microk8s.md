@@ -36,11 +36,11 @@ Rarely needed for this step. If investigating node-level issues:
 ```bash
 # Find the primary juju add-k8s error
 grep "add-k8s\|database is locked\|cluster role binding" \
-  /tmp/<uuid>/generated/existing_juju_maas_controller_microk8s/log.txt
+  <work_dir>/<uuid>/generated/existing_juju_maas_controller_microk8s/log.txt
 
 # Check MicroK8s unit health in juju status
 grep -E "error|blocked|waiting|maintenance" \
-  /tmp/<uuid>/generated/existing_juju_maas_controller_microk8s/juju_status_foundations-maas_microk8s.txt
+  <work_dir>/<uuid>/generated/existing_juju_maas_controller_microk8s/juju_status_foundations-maas_microk8s.txt
 ```
 
 ## Known Failure Patterns

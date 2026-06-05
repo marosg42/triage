@@ -40,9 +40,9 @@ The crashdump is for the `kubernetes-openstack` Juju model — it contains logs 
 
 ```bash
 # Extract crashdump
-mkdir -p /tmp/k8s-crashdump
-tar -xzf generated/kubernetes-openstack/juju-crashdump-kubernetes-openstack-*.tar.gz -C /tmp/k8s-crashdump
-# Then use: /tmp/k8s-crashdump/<uuid>/4/baremetal/var/log/nginx/apilb.access.log
+mkdir -p <work_dir>/k8s-crashdump
+tar -xzf generated/kubernetes-openstack/juju-crashdump-kubernetes-openstack-*.tar.gz -C <work_dir>/k8s-crashdump
+# Then use: <work_dir>/k8s-crashdump/<uuid>/4/baremetal/var/log/nginx/apilb.access.log
 ```
 
 ## Grep Patterns
@@ -55,29 +55,29 @@ grep -E "ERROR|failed|unreachable|contact api" generated/juju_kubernetes_control
 grep -E "bootstrap|Downloading|Starting controller|Contacting|show-controller" generated/juju_kubernetes_controller/log.txt
 
 # In GH runner log: find the exact error and timing
-grep -n "unable to contact api\|connection refused\|not found\|bootstrap.*exit" /tmp/run_<run_id>_failed.log | head -20
+grep -n "unable to contact api\|connection refused\|not found\|bootstrap.*exit" <work_dir>/run_<run_id>_failed.log | head -20
 
 # Verify k8s cluster was healthy before this step
 grep -E "active|idle|Ready|error" generated/kubernetes-openstack/juju-status-verbose.txt | grep -v "^#" | head -20
 
 # === FROM CRASHDUMP (kubeapi-lb nginx access log) ===
 # Check all activity in the controller-foundations-kubernetes namespace (timeline of pod lifecycle)
-grep "controller-foundations-kubernetes" /tmp/k8s-crashdump/*/4/baremetal/var/log/nginx/apilb.access.log | \
+grep "controller-foundations-kubernetes" <work_dir>/k8s-crashdump/*/4/baremetal/var/log/nginx/apilb.access.log | \
   grep -v "kube-node-lease" | head -100
 
 # Look for the kubelet activity gap (CrashLoopBackOff)
-grep "controller-0.*status" /tmp/k8s-crashdump/*/4/baremetal/var/log/nginx/apilb.access.log | \
+grep "controller-0.*status" <work_dir>/k8s-crashdump/*/4/baremetal/var/log/nginx/apilb.access.log | \
   awk '{print $4, $6, $7, $8, $9}' | tr -d '[]"'
 
 # Check if PVC was bound (storage problem?)
-grep "storage-controller-0\|volumeattachment" /tmp/k8s-crashdump/*/4/baremetal/var/log/nginx/apilb.access.log | head -20
+grep "storage-controller-0\|volumeattachment" <work_dir>/k8s-crashdump/*/4/baremetal/var/log/nginx/apilb.access.log | head -20
 
 # Check for event 403 errors (RBAC cleaned up while pod still running)
 grep "controller-foundations-kubernetes.*403\|controller-foundations-kubernetes.*404" \
-  /tmp/k8s-crashdump/*/4/baremetal/var/log/nginx/apilb.access.log | tail -20
+  <work_dir>/k8s-crashdump/*/4/baremetal/var/log/nginx/apilb.access.log | tail -20
 
 # Check for nginx restarts (may indicate kubeapi-lb was reconfigured)
-grep "nginx.*stop\|nginx.*start\|Failed with result" /tmp/k8s-crashdump/*/4/baremetal/var/log/syslog
+grep "nginx.*stop\|nginx.*start\|Failed with result" <work_dir>/k8s-crashdump/*/4/baremetal/var/log/syslog
 ```
 
 ## Known Failure Patterns

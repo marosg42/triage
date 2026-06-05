@@ -34,7 +34,7 @@ investigation is limited to GitHub Actions logs and Swift artifacts.
 
 ## Key Log Files (inside crashdump tgz)
 
-Extract: `tar -xzf juju-crashdump-kubernetes-aws-*.tar.gz -C /tmp/k8s-aws-crashdump`
+Extract: `tar -xzf juju-crashdump-kubernetes-aws-*.tar.gz -C <work_dir>/k8s-aws-crashdump`
 
 | File | What it contains | When to use |
 |---|---|---|
@@ -49,11 +49,11 @@ Extract: `tar -xzf juju-crashdump-kubernetes-aws-*.tar.gz -C /tmp/k8s-aws-crashd
 ```bash
 # Find all errors in aws-integrator log
 grep -E "ERROR|blocked|EntityAlreadyExists|TagLimitExceeded|AWSError" \
-  /tmp/k8s-aws-crashdump/*/0/baremetal/var/log/juju/unit-aws-integrator-0.log
+  <work_dir>/k8s-aws-crashdump/*/0/baremetal/var/log/juju/unit-aws-integrator-0.log
 
 # Get the sequence of blocked messages with timestamps
 grep "status-set: blocked\|status-set: maintenance\|Granting request" \
-  /tmp/k8s-aws-crashdump/*/0/baremetal/var/log/juju/unit-aws-integrator-0.log | tail -40
+  <work_dir>/k8s-aws-crashdump/*/0/baremetal/var/log/juju/unit-aws-integrator-0.log | tail -40
 
 # Check the aws-integrator blocked message from juju status JSON
 python3 -c "
@@ -64,18 +64,18 @@ print('Status:', json.dumps(ai.get('application-status', {}), indent=2))
 "
 
 # Find units stuck in waiting/blocked in GH failed log
-grep "workload status is blocked\|workload status is waiting" /tmp/run_<run_id>_failed.log | tail -30
+grep "workload status is blocked\|workload status is waiting" <work_dir>/run_<run_id>_failed.log | tail -30
 
 # Find the juju-wait timeout
-grep "Not ready in\|CalledProcessError.*juju-wait" /tmp/run_<run_id>_failed.log
+grep "Not ready in\|CalledProcessError.*juju-wait" <work_dir>/run_<run_id>_failed.log
 
 # Find subnet tagging errors (TagLimitExceeded)
 grep "TagLimitExceeded\|CreateTags" \
-  /tmp/k8s-aws-crashdump/*/0/baremetal/var/log/juju/unit-aws-integrator-0.log
+  <work_dir>/k8s-aws-crashdump/*/0/baremetal/var/log/juju/unit-aws-integrator-0.log
 
 # Find IAM role create-role errors
 grep "EntityAlreadyExists\|create-role\|CreateRole" \
-  /tmp/k8s-aws-crashdump/*/0/baremetal/var/log/juju/unit-aws-integrator-0.log
+  <work_dir>/k8s-aws-crashdump/*/0/baremetal/var/log/juju/unit-aws-integrator-0.log
 ```
 
 ## Known Failure Patterns

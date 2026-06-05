@@ -135,7 +135,7 @@ code — not a failure of the remote command itself.
 ```bash
 python3 -c "
 import json
-data = open('/tmp/output.log').read()
+data = open('<work_dir>/output.log').read()
 lines = data.splitlines()
 configure_lines = [(i,l) for i,l in enumerate(lines) if 'sunbeam configure' in l or 'Broken pipe' in l or 'client_loop' in l]
 for i,l in configure_lines: print(i, l)
@@ -255,7 +255,7 @@ Always verify the actual cluster state before concluding the join failed.
 **Key diagnostic check:**
 ```bash
 # After extracting bundle:
-grep "chespin\|<failing_node>" /tmp/<uuid>/generated/sunbeam/sunbeam_cluster_list.txt
+grep "chespin\|<failing_node>" <work_dir>/<uuid>/generated/sunbeam/sunbeam_cluster_list.txt
 ```
 If the node shows `running` with expected roles `active`, the join succeeded.
 
@@ -320,7 +320,7 @@ The entire 1200-second subprocess timeout then fires before terraform can recove
 **Key diagnostic:**
 ```bash
 # The terraform apply log is the definitive source:
-find /tmp/<uuid>-snaps -name "terraform-apply-*.log" -path "*/demo-setup/*"
+find <work_dir>/<uuid>-snaps -name "terraform-apply-*.log" -path "*/demo-setup/*"
 
 # Look for the blocking resource and when retries started/ended:
 grep -E "ERROR|context deadline|retries exhausted|user_network" terraform-apply-*.log
@@ -437,9 +437,9 @@ fails in under 62 seconds.
 tar -tJf generated/sunbeam/sosreport-<bootstrap-node>-*.tar.xz | grep "demo-setup/terraform-apply"
 
 # Extract and check for 502 errors:
-tar -xJf generated/sunbeam/sosreport-<bootstrap-node>-*.tar.xz -C /tmp/sos \
+tar -xJf generated/sunbeam/sosreport-<bootstrap-node>-*.tar.xz -C <work_dir>/sos \
   --wildcards "*/demo-setup/terraform-apply-*.log"
-grep "502\|Bad Gateway\|ERROR.*vertex" /tmp/sos/*/home/ubuntu/snap/openstack/common/etc/*/demo-setup/terraform-apply-*.log
+grep "502\|Bad Gateway\|ERROR.*vertex" <work_dir>/sos/*/home/ubuntu/snap/openstack/common/etc/*/demo-setup/terraform-apply-*.log
 
 # Check Traefik settling in juju debug log around configure start time:
 grep "<configure-start-minute>" generated/sunbeam/juju_debug_log_openstack.txt | grep -i "traefik.*not ready\|provider not ready.*neutron"
@@ -640,11 +640,11 @@ cloud-init + agent), the hard-coded 15-minute timeout in `steps/juju.py` fires f
 **Confirming via MAAS logs:**
 ```bash
 # Check both HA machines' boot and netboot_off times:
-grep -h "juju-2\|juju-3\|wknfb4\|mg64te" /tmp/maas-logs/*/var/log/syslog \
+grep -h "juju-2\|juju-3\|wknfb4\|mg64te" <work_dir>/maas-logs/*/var/log/syslog \
   | grep "squashfs\|netboot_off\|deployed_os\|DeployWorkflow" | sort
 
 # Confirm machine was still in cloud-init at timeout:
-grep -h "metadata/status/mg64te" /tmp/maas-logs/*/var/log/syslog \
+grep -h "metadata/status/mg64te" <work_dir>/maas-logs/*/var/log/syslog \
   | grep "15:24:5" | head -5
 ```
 
@@ -737,7 +737,7 @@ grep "cinder-volume" generated/sunbeam/juju_status_openstack-machines.txt | grep
 # Expect no output if all units are active
 
 # Check other joins completed successfully:
-grep "Node joined cluster" /tmp/run_<id>_failed.log
+grep "Node joined cluster" <work_dir>/run_<id>_failed.log
 ```
 
 **See also:** LP bug #2121929 ("parallel joins resulted in ReapplyHypervisorStep failure") — same mechanism, different unit (`openstack-hypervisor` instead of `cinder-volume`).
@@ -839,7 +839,7 @@ grep "k8s/" generated/sunbeam/juju_status_openstack-machines.txt | grep -v "acti
 # Expect no output if all k8s units are active
 
 # Check other joins completed:
-grep "Node joined cluster" /tmp/run_<id>_failed.log
+grep "Node joined cluster" <work_dir>/run_<id>_failed.log
 ```
 
 **Distinguishing from cinder-volume/amqp variant:**

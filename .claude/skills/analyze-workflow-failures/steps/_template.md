@@ -28,13 +28,13 @@ Useful search strings for this step's failure modes:
 
 ```bash
 # Find the primary error
-grep -rn "<error_pattern>" /tmp/maas-logs/*/var/log/syslog
+grep -rn "<error_pattern>" <work_dir>/maas-logs/*/var/log/syslog
 
 # Check service status around failure time
-grep -h "<timestamp_prefix>" /tmp/maas-logs/*/var/log/syslog | grep "<service>"
+grep -h "<timestamp_prefix>" <work_dir>/maas-logs/*/var/log/syslog | grep "<service>"
 
 # Find relevant events
-grep -h "<keyword>" /tmp/maas-logs/*/var/log/ | sort
+grep -h "<keyword>" <work_dir>/maas-logs/*/var/log/ | sort
 ```
 
 ## Known Failure Patterns

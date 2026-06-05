@@ -38,22 +38,22 @@ The archive contains per-infra-node directories (e.g. `10.241.144.2/`, `10.241.1
 
 ```bash
 # Status transitions for failing nodes
-grep "Status transition" /tmp/maas-logs/10.241.144.2/var/log/syslog | grep -i "deploy"
+grep "Status transition" <work_dir>/maas-logs/10.241.144.2/var/log/syslog | grep -i "deploy"
 
 # AppArmor virsh denials (pkttyagent / syscall)
-grep "apparmor.*DENIED.*virsh\|DENIED.*pkttyagent" /tmp/maas-logs/10.241.144.2/var/log/syslog
+grep "apparmor.*DENIED.*virsh\|DENIED.*pkttyagent" <work_dir>/maas-logs/10.241.144.2/var/log/syslog
 
 # Snap installation / refresh event
-grep "Installing snap\|auto-refresh\|snap-maas-" /tmp/maas-logs/10.241.144.2/var/log/syslog | head -20
+grep "Installing snap\|auto-refresh\|snap-maas-" <work_dir>/maas-logs/10.241.144.2/var/log/syslog | head -20
 
 # Curtin callbacks from target nodes (shows installation progress)
-grep "POST /MAAS/metadata/status/<system_id>" /tmp/maas-logs/10.241.144.2/var/log/syslog
+grep "POST /MAAS/metadata/status/<system_id>" <work_dir>/maas-logs/10.241.144.2/var/log/syslog
 
 # Pacemaker VIP warnings (HA instability)
-grep "Unexpected result.*not running.*res_" /tmp/maas-logs/10.241.144.2/var/log/syslog | head -10
+grep "Unexpected result.*not running.*res_" <work_dir>/maas-logs/10.241.144.2/var/log/syslog | head -10
 
 # Node reaching installed OS (post-curtin boot)
-grep "maas-machine.*\[node[0-9]\].*cloud-config\|cloud-init.*finished" /tmp/maas-logs/10.241.144.2/var/log/syslog
+grep "maas-machine.*\[node[0-9]\].*cloud-config\|cloud-init.*finished" <work_dir>/maas-logs/10.241.144.2/var/log/syslog
 ```
 
 ## Known Failure Patterns
@@ -217,13 +217,13 @@ observed log: `got primary mirror: None / got security mirror: None` during
 
 ```bash
 # Find install_kernel FAIL in syslog
-grep "installing-kernel: FAIL\|Unable to locate package" /tmp/maas-logs/10.241.144.2/var/log/syslog
+grep "installing-kernel: FAIL\|Unable to locate package" <work_dir>/maas-logs/10.241.144.2/var/log/syslog
 
 # Confirm zero squid requests during apt-get update window
-grep "<node_ip>" /tmp/maas-logs/10.241.144.3/var/log/syslog | grep "squid" | grep "<timestamp_window>"
+grep "<node_ip>" <work_dir>/maas-logs/10.241.144.3/var/log/syslog | grep "squid" | grep "<timestamp_window>"
 
 # Curtin traceback in node console
-grep "\[node5\].*Traceback\|\[node5\].*ProcessExecutionError\|\[node5\].*install_kernel" /tmp/maas-logs/10.241.144.2/var/log/syslog
+grep "\[node5\].*Traceback\|\[node5\].*ProcessExecutionError\|\[node5\].*install_kernel" <work_dir>/maas-logs/10.241.144.2/var/log/syslog
 ```
 
 **Timing from run 23910974753 (UUID f8251919, cluster_6, 2026-04-02):**
@@ -282,14 +282,14 @@ The Temporal `DeployWorkflow` retries the deployment on each failure. Each retry
 ```bash
 # Confirm installing-missing-packages failure in syslog
 grep "installing-missing-packages: FAIL\|Unable to locate package efibootmgr" \
-  /tmp/maas-logs/10.241.128.2/var/log/syslog
+  <work_dir>/maas-logs/10.241.128.2/var/log/syslog
 
 # Confirm multiple Curtin restart PIDs (Temporal retries)
-grep "\[suicune\].*start: cmd-install:" /tmp/maas-logs/10.241.128.2/var/log/syslog | head -10
+grep "\[suicune\].*start: cmd-install:" <work_dir>/maas-logs/10.241.128.2/var/log/syslog | head -10
 
 # Verify <200ms apt-get duration
 grep "\[suicune\].*cloud-init\[1532\].*Reading package lists\|Installing packages on target" \
-  /tmp/maas-logs/10.241.128.2/var/log/syslog
+  <work_dir>/maas-logs/10.241.128.2/var/log/syslog
 ```
 
 **Timing from run 23969669421 (UUID 16f351cf, dh1_j2, 2026-04-04):**
@@ -402,7 +402,7 @@ it gets an empty result set.
 
 ```bash
 # Confirm unreachable boot source in GitHub Actions log
-grep "boot-source update" /tmp/run_<id>_failed.log
+grep "boot-source update" <work_dir>/run_<id>_failed.log
 
 # Confirm CRITICAL import failure in syslog
 grep "Importing boot resources failed\|No route to host" \
@@ -410,7 +410,7 @@ grep "Importing boot resources failed\|No route to host" \
 
 # Confirm region DB has no boot resources (cross-check)
 # The machines create MAAS API response will have "It should be one of: ''."
-grep "is not a valid architecture" /tmp/run_<id>_failed.log
+grep "is not a valid architecture" <work_dir>/run_<id>_failed.log
 ```
 
 **Timing from run 24122101622 (UUID 01dd77f9, tor3-sqa-virtual_maas cluster_6, 2026-04-08):**
