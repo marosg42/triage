@@ -482,15 +482,3 @@ remained `Deploying` at failure; no hardware errors.
   (no `/var/log/syslog`); if the journal is truncated, lower-level ephemeral failure details
   may not be determinable from available artifacts
 
-## Version History
-
-- **v1.0** (2026-03-25): Initial version — MongoDB "not master" pattern from run 23512120069
-  (UUID c6a6fdfd, tor3-sqa-virtual_maas cluster_3)
-- **v1.1** (2026-04-08): Added Pattern B — "Failed deployment: Loading ephemeral" on physical
-  node `duosion` (68dntx, zone1) during `deploy_maas_machines`; 4/5 nodes deployed; 30-min
-  FCE timeout; no curtin_config for failing node; MAAS journal truncated; from run
-  24111787100 (UUID b881ccd8, tor3-sqa-dedicated_maas dh1_j2, main, 2026-04-08).
-- **v1.3** (2026-04-08): Added Pattern D — all 4 nodes remain `Ready` throughout (never `Deploying`); Juju provisioner receives `400 Bad Request: 'jammy' is not a valid distro_series` from MAAS deploy API; MAAS boot source had Jammy selection but sync only produced Noble images; not retryable without importing Jammy image first; from run 24120449876 (UUID 00a49a3b, tor3-sqa-virtual_maas, main, 2026-04-08, SKU master-magpie-snap-jammy-mixed).
-- **v1.4** (2026-05-06): Added Pattern E — MongoDB primary election disrupts juju-wait and renders Juju API completely unreachable for ~5–6 min; more severe than Pattern A (write failure only); juju-wait exits immediately due to `--retry_errors 0`; subsequent `juju status` returns `no reachable servers`; version collector confirms outage via `connection is shut down`; controller self-recovers (crashdump collected); from run 25455244438 (UUID 965bc456, tor3-sqa-virtual_maas cluster_4, main, 2026-05-06).
-- **v1.5** (2026-05-07): Added Pattern F — MAAS Temporal server deadlock during `deploy_maas_machines` polling; PostgreSQL serialization pressure from 6 concurrent deployments → Temporal DB timeouts → goroutine deadlock → shard loss → 12+ min MAAS API hang → OAuth token expiry (exit code 2, "Expired timestamp"); updated Notes to clarify that Temporal errors CAN be the root cause (not always background noise); from run 25492917651 (UUID 35f56c6f, tor3-sqa-virtual_maas cluster_6, MAAS 3.5.12, main, 2026-05-07).
-- **v1.6** (2026-05-06): Added second confirmed occurrence of Pattern F — UUID 4ec765e5 (cluster_1, run 25442241821); 663s hang on `g3xkde` (vs 773s in first occurrence); Temporal/PostgreSQL syslog not available but escalating read times (91s → 93s → 663s) match the same mechanism; MAAS HTTP access log on infra1 confirms the request arrived at nginx at 17:11:23 and returned 401, with no access log entry for the 663-second queuing period.

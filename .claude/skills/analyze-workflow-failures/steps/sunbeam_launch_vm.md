@@ -213,10 +213,3 @@ never saw the eventual success output.
   cloud substrates the runner connects directly.
 - Sunbeam snap revision at time of first observation: `956`
 
-## Version History
-
-- **v1.0** (2026-03-31): Initial version — Pattern A (No route to host) from run 23688090524 (UUID 6e7c84f2, tor3-sqa-shared_maas dh1_j8_1)
-- **v1.1** (2026-04-21): Added Pattern B — Nova BUILD timeout (VM never reached ACTIVE); from run 24664528578 (UUID a44c1e26, tor3-sqa-testflinger cluster_2, main, 2026-04-20)
-- **v1.2** (2026-05-25): Added Pattern C — create request and VIF plug succeeded, but later `GET /servers/<id>` returned 504 while `neutron-2` health checks were timing out behind Traefik; from run 26309147742 (UUID 3a40980c-7461-46e7-b0a2-8eaaa707e53e, tor3-sqa-testflinger cluster_1, branch aipoc)
-- **v1.4** (2026-06-02): Confirmed Pattern A on `tor3-sqa-testflinger` / `cluster_3` — `sunbeam launch` returned `ubuntu@10.242.4.191`, Neutron associated floating IP `10.242.4.191` to port `ac1bbca9-d65b-4cd3-83e0-f8a32cce0a69`, and Nova recorded `network-vif-plugged` for instance `7ce0d1b2-ff72-4289-942a-3224c7caf851` on `jasperoid.maas`, but all 30 SSH probes from bootstrap node `octopot.maas` failed with `No route to host`; from run 26644918393 (UUID f34d99dd-687b-4324-961b-2cdc1ce10bac, branch main, 2026-05-29)
-- **v1.3** (2026-05-27): Added Pattern D — runner-side SSH session/piped `grep "ubuntu@"` exited 255 and disconnected by user, but bootstrap-side `sunbeam launch` continued, created server `1de70608-65f8-44a7-9a04-13e26c7dc19e`, reached `ACTIVE`, and associated floating IP `10.243.37.136`; from run 26401300048 (UUID b0948bbd-e549-4004-8668-993513adf7b0, tor3-sqa-shared_maas dh1_j8_2, branch main, openstack rev 1004)

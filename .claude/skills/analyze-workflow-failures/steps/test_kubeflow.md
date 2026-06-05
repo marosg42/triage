@@ -170,7 +170,3 @@ substrates). Not applicable to MAAS substrates.
 - Juju error logs shown in the pytest output are collected from the model at teardown; they reflect the state of charm units *at the moment of collection*, not necessarily at the moment of test failure.
 - For the `kubeflow-mlflow-remote` tox env, `test_kubeflow_workloads` launches a Kubernetes Job that runs the notebook suite inside a pod (Python 3.11). Job logs are fetched and embedded in `4-commands[1].log` — the inner pytest session results appear from approximately line 379 onward.
 
-## Version History
-
-- **v1.0** (2026-04-08): Initial version — etcd leader election / `storage is (re)initializing` pattern from run 24122089114 (UUID 40826399, tor3-sqa-dedicated_maas dh1_j2)
-- **v1.1** (2026-04-09): Added Pattern B — mlflow-server nodePort 31380 conflict on AKS causes persistent 503; 3 MLflow notebooks fail; e2e-wine KFP run stalls as cascade; from run 24122085937 (UUID a6794ed1, ext-sqa-aks useast, main, track/1.10, 2026-04-08)

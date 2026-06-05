@@ -183,14 +183,3 @@ _Add more patterns below as they are discovered._
   3600s even when units are blocked. This means a permanent blocker like `EntityAlreadyExists`
   will always exhaust the full timeout.
 
-## Version History
-
-- **v1.0** (2026-03-31): Initial version from analysis of run 23782846040 (UUID 07904a30,
-  ext-sqa-aws useast1). EntityAlreadyExists IAM role + TagLimitExceeded subnet pattern documented.
-- **v1.1** (2026-04-08): Extended Pattern A to cover same-run intra-run re-trigger (not only
-  cross-run stale role). Confirmed via run 24122087737 (UUID c46a2ec4, useast1): fresh model,
-  role created at 07:14:49, re-creation triggered at 07:19:21 by second aws-relation-changed event.
-- **v1.2** (2026-05-19): Added IAM propagation sub-variant to Pattern A (run 26070574226, UUID
-  81d842aa): `AssociateIamInstanceProfile` fails with `InvalidParameterValue` 1s after instance
-  profile creation (EC2 propagation lag); `_retry_for_entity_delay` only catches `NoSuchEntity`,
-  not `InvalidParameterValue`; leaves orphaned role; 17 EntityAlreadyExists retries until timeout.

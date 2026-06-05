@@ -63,6 +63,3 @@ _Add more patterns below as they are discovered._
 - Deployments on public cloud substrates (like `ext-sqa-aks`) typically lack MAAS logs.
 - If crashdumps are missing, diagnosis heavily relies on `juju status` output captured in `run.log` or `lastlines.txt`.
 
-## Version History
-
-- **v1.0** (2026-06-05): Initial version based on `mlflow-mysql` hook failure on AKS.

@@ -98,6 +98,3 @@ _Add more patterns below as they are discovered._
 - The microk8s charm takes 15-30+ minutes to fully deploy (snap install + cluster formation) — expect long `executing`/`maintenance` periods in juju-wait output.
 - `juju export-bundle -m foundations-maas:microk8s` will fail if the model doesn't exist yet (expected at step start).
 
-## Version History
-
-- **v1.0** (2026-04-26): Initial version. Pattern A: Juju machine agent `down` while unit active, from run 24889818217 (UUID 951e7528, tor3-sqa-virtual_maas cluster_3, Juju 4.0.8, 2026-04-24).

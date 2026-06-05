@@ -399,12 +399,3 @@ _Add more patterns below as they are discovered._
   and peer-certificates instead of certificates).
 - The `juju wait-for` timeout is hardcoded at 60 minutes; slow VMs may legitimately need more.
 
-## Version History
-
-- **v1.0** (2026-03-26): Initial version — 60m timeout on cluster node join (run 23343431862)
-- **v1.1** (2026-03-26): Added Juju agent never connected pattern — Nova VM ACTIVE but agent never registers, machine stays Juju `pending` (run 23343435826, UUID 57cc163c)
-- **v1.2** (2026-03-30): Linked bug report canonical/mysql-operators#189 for mysqld socket race pattern
-- **v1.3** (2026-05-04): Second occurrence of Juju agent never connected confirmed (run 25109744547, UUID 2edfd3e6, mysql/1); added crashdump evidence showing "never moved to long poll group" as the controller-side confirmation; updated root cause note to reference Nova console log as the missing diagnostic
-- **v1.4** (2026-05-04): Added Pattern C — Nova `oslo_db.exception.DBConnectionError` (HTTP 500) blocks provisioning of auxiliary VMs (self-signed-certificates, data-integrator); 11 retries exhausted over ~5-min window; AZ becoming "not valid" signals nova-compute restart; mysql TLS blocked as cascade; from run 25166260474 (UUID aa136dd9, tor3-sqa-sunbeam cluster_1, 2026-04-30)
-- **v1.5** (2026-05-18): Added Pattern 4 — ops-framework defer deadlock (mysql/1: circular TLS↔cluster-metadata dependency) + blocking `join_innodb_cluster` call (mysql/2: `database-peers-relation-changed` hook never returns); no hook exit-1 failures; same root cause as Pattern 1 (mysql-operators#189) but graceful deferral in place of exception; from run 25964063826 (UUID 6424e6d7, tor3-sqa-sunbeam cluster_1, main, 2026-05-16)
-- **v1.6** (2026-05-26): Pattern 2 updated with confirmed root cause from live investigation of UUID ac4e7f36 (run 26339137164): OVN metadata proxy race on ubuntu@24.04 — `force_config_drive` not set; cloud-init uses IMDS via `neutron-ovn-metadata-agent` + per-network HAProxy; when metadata not ready at boot (OVN plumbing latency, OVN SB drops), ubuntu@24.04 cloud-init falls back to NoCloud (shorter detection window vs 22.04); `Used fallback datasource` in Nova console log is the definitive signal; Juju controller is innocent bystander; SSH to 169.254.169.254 confirmed routed through OVN → haproxy → nova-api-metadata on hypervisor; user_data latency measured at 2.2s on cold cache; added console log diagnostic steps and example.

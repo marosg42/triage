@@ -64,6 +64,3 @@ _Add more patterns below as they are discovered._
 - Which infra node typically has the relevant logs
 - Any known timing issues or race conditions
 
-## Version History
-
-- **v1.0** (<date>): Initial version

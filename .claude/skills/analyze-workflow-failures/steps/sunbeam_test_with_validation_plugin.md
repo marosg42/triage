@@ -114,7 +114,3 @@ _Add patterns below as they are discovered._
 - "quick" validation (API-only) always runs before "smoke"; if quick passes but smoke fails,
   the data plane is the suspect (VMs/networking), not the API layer
 
-## Version History
-
-- **v1.0** (2026-03-31): Initial version — step not yet encountered in a failed run;
-  file created proactively to document the shared validation log layout.

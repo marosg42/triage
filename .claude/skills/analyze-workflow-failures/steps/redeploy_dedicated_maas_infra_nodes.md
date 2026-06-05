@@ -98,6 +98,3 @@ post-deploy boot/network/cloud-init failure.
 - Absence of `generated/maas/logs-*.tgz` after this failure is expected: later collection also
   depends on SSH access to the redeployed infra hosts.
 
-## Version History
-
-- **v1.0** (2026-05-27): Initial version documenting dedicated MAAS infra redeploy failure where Terraform/MAAS reported success but `anahuac` never became SSH reachable, from run 26388149930 (UUID 0cae049e-3e7d-44d5-b9d8-5546a97ec55a, tor3-sqa-dedicated_maas dh1_j2, branch `aipoc`).

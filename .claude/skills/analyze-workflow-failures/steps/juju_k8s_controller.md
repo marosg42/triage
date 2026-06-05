@@ -135,10 +135,3 @@ _Add more patterns below as they are discovered._
 - `juju add-k8s` success does NOT guarantee bootstrap will succeed — the cluster may be
   reachable but the image reference Juju generates for the target cloud type may be invalid.
 
-## Version History
-
-- **v1.0** (2026-04-29): Initial version — Pattern A: `invalid reference format` during
-  Juju 4.0.9 bootstrap on AKS Kubernetes 1.34.4, run 25087533337 (UUID b4c9324a).
-- **v1.1** (2026-04-29): Corrected root cause — not `jujud-controller-snap-source:legacy`
-  but a snap build defect: `JujudOCINamespace` overridden to empty string by linker flag in
-  `snapcraft.yaml` (commit `29278b68a4`, 2026-04-16). Confirmed via juju/juju source diff.

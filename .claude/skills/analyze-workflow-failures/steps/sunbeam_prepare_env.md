@@ -165,8 +165,3 @@ _Add more patterns below as they are discovered._
 - If `maasserver_routable_pairs` errors appear before any snap refresh event, the DB may
   have been left in a broken state by a previous run's failed refresh (Variant A residue)
 
-## Version History
-
-- **v1.2** (2026-05-27): Added Pattern 3 — freshly provisioned bootstrap node fails `snap install microceph --channel squid/candidate` during `clean_disks.py` because snapd's `Fetch and check assertions for snap "snapd"` task gets HTTP 408 from the Snap Store; from run 26444914683 (UUID 4c95aea6-4e93-4bd5-8703-c3747f93f640, tor3-sqa-virtual_maas cluster_1).
-- **v1.1** (2026-05-25): Added Pattern 2 — `tor3-sqa-testflinger` node missing configured OSD device (`/dev/disk/by-dname/disk1`) causes `clean_disks.py` to fail immediately with `wipefs: ... No such file or directory` before manifest generation.
-- **v1.0** (2026-03-23): Initial version from analysis of runs 23388633087, 23377136139, 23406159064

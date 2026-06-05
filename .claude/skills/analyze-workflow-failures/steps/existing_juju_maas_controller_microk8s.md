@@ -93,7 +93,3 @@ _Add more patterns below as they are discovered._
   nodes. If Ceph is degraded, a different error will surface.
 - MicroK8s 1.28/stable has been observed on this cluster.
 
-## Version History
-
-- **v1.0** (2026-03-25): Initial version — dqlite database locked pattern from
-  run 23491280339 (UUID c0a33b83, tor3-sqa-virtual_maas cluster_4)

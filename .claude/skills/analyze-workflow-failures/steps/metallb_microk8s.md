@@ -107,7 +107,3 @@ _Add more patterns below as they are discovered._
   appears before the main error — this is expected behaviour (FCE probes for the
   model before attempting to create it).
 
-## Version History
-
-- **v1.0** (2026-03-25): Initial version — unexpected EOF pattern from run
-  23491285216 (UUID 8647be66, tor3-sqa-virtual_maas cluster_6)

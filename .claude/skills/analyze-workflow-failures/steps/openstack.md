@@ -194,7 +194,3 @@ issue at charm install time), the binary is missing and the hook fails with
 - The juju-wait timeout is 14400 seconds (4 hours), with `--machine-error-timeout 1800` (30 min). The machine error timeout only fires if juju reports the machine in an error state — it does NOT catch machines that appear "allocating/idle" but are actually unreachable.
 - `hacluster-vault` with 0 units in juju status is expected when vault deployment is not yet complete.
 
-## Version History
-
-- **v1.0** (2026-03-30): Initial version, based on analysis of run fbca1fd5-9264-4007-af42-62700e5afb3c
-- **v1.1** (2026-04-01): Added pattern: `octavia-ovn-chassis` hook error — `ovs-vsctl` not found in LXD container; from run 23356105586 (UUID c0a6632d, tor3-sqa-shared_maas dh1_j9_1, 2026-03-20).

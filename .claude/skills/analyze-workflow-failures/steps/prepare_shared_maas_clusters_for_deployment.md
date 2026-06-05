@@ -87,7 +87,3 @@ _Add more patterns below as they are discovered._
 - There are no MAAS infrastructure logs for `shared_maas`; GitHub runner logs are usually the only direct failure evidence.
 - The top-level workflow step wraps multiple composite-action substeps, so identify whether the failure happened in `MAAS Login`, `Release Machines`, or `Add partitions` before drawing conclusions.
 
-## Version History
-
-- **v1.1** (2026-05-27): Added Pattern 2 — `maas login` to shared MAAS never returns, emits no diagnostic output, and is eventually killed by the runner with exit code 143 before `Release Machines` starts; from run 26440193596 (UUID 9566a408-3d65-4f7c-9091-6e7d1ddaa52e).
-- **v1.0** (2026-05-27): Initial version documenting MAAS CLI `IncompleteRead` while enumerating machines in a shared resource pool (run 26455309054, UUID ba7fec2e-a8fc-4ef3-af81-a4cddb368035).

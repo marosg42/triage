@@ -202,16 +202,3 @@ _Add more patterns below as they are discovered._
 - The controller image repo `ghcr.io/juju` is used for all CAAS bootstraps. Rate limiting
   or transient pull failures from ghcr.io can cause this pattern.
 
-## Version History
-
-- **v1.0** (2026-03-24): Initial version from analysis of run 23372951162 (UUID 990c6ff4).
-  Controller pod started but API unreachable; 60-attempt retry exhaustion pattern documented.
-- **v1.1** (2026-03-24): Deep analysis using kubernetes-openstack crashdump nginx API LB log.
-  CrashLoopBackOff confirmed (11m24s kubelet silence gap). PVC/Cinder storage ruled out.
-  Added precise per-second timeline, crashdump artifact guide, and grep patterns for the LB log.
-- **v1.2** (2026-03-24): Added third confirmed occurrence — run 23408678722 (UUID 1a004baa,
-  tor3-sqa-shared_maas, 2026-03-22). Identical symptom: 11m45s 60-attempt exhaustion on
-  tor3-sqa-shared_maas. Pattern now confirmed recurring/intermittent on this substrate.
-- **v1.2** (2026-03-24): Second occurrence of same pattern recorded — run 23395916011 (UUID
-  8ebb62bd, tor3-sqa-shared_maas dh1_j8_2, 2026-03-22). Same cluster, same versions, healthy
-  k8s cluster, working reference run 1fcd7f2a succeeded in 14s on same cluster previous day.

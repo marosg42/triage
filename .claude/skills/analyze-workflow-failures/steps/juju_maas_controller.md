@@ -289,10 +289,3 @@ _Add more patterns below as they are discovered._
 - `maas root tags create` errors for tags that already exist are always benign — the script
   handles them by proceeding to `tag update-nodes`.
 
-## Version History
-
-- **v1.1** (2026-03-23): Deep MAAS log analysis of UUID 566b109e — refined root cause into
-  two sub-patterns (A: install succeeded but VM didn't return after reboot; B: install stuck).
-  Added DHCP/console timeline, MAC address `00:16:3e:f3:21:78`, and grep commands for
-  distinguishing sub-patterns.
-- **v1.3** (2026-04-10): Added Pattern D — SSH Broken Pipe during machine configuration script (exit code 255); SSH connects but session severed exactly 60 s into config script (before "Bootstrap agent now started"); likely NAT/firewall idle-TCP timeout on dh1_j8_2; from run 24170470366 (UUID 470c0f4a, tor3-sqa-shared_maas dh1_j8_2, machine gtm7yw).

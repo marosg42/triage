@@ -112,7 +112,3 @@ attempt to open at import time. This causes `maas-region dbupgrade` to crash bef
 migration runs. The snap hook framework doesn't detect this as a failure in Variant B because
 the hook's shell wrapper exits cleanly.
 
-## Version History
-
-- First observed: MAAS snap rev 41404, March 2026
-- Affected clusters: tor3-sqa-virtual_maas cluster_2, cluster_4, cluster_6

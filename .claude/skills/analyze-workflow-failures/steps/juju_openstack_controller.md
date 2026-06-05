@@ -141,7 +141,3 @@ _Add more patterns below as they are discovered._
 - The `model_defaults.yaml` `network:` field must correspond to a network that is mapped to the Juju space FCE expects (`alpha`). A misconfigured OpenStack space → network mapping in the cluster config will cause this failure on every run.
 - No MAAS logs exist for this substrate type.
 
-## Version History
-
-- **v1.0** (2026-03-26): Initial version — controller not in space "alpha" pattern from run 23573425818 (UUID 00908688, ext-sqa-ps6_openstack cluster_1)
-- **v1.2** (2026-03-30): Added Pattern B — Nova `MessagingTimeout` fault during `openstack_bootstrap`; VM stuck in BUILD for 6 retries, never reached `enable_ha`; from run 23748868831 (UUID 1a687feb, tor3-sqa-sunbeam cluster_4).

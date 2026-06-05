@@ -136,7 +136,3 @@ fault, power event) can take down all VMs simultaneously, causing:
   infrastructure being down — the reporter times out trying to reach Weebl/infra. It is
   not an independent failure.
 
-## Version History
-
-- **v1.0** (2026-04-01): Initial version, based on analysis of run 23162727086
-  (UUID 0551bd1b, tor3-sqa-virtual_maas cluster_4, 2026-03-16).
