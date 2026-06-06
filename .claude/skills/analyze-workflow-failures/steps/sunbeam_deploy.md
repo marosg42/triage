@@ -2013,3 +2013,129 @@ _Add more patterns below as they are discovered._
 - `sosreport-<node>.tar.xz` files are large (5–16 MB each) — download only the specific failing node's report if needed
 - Exit code **255** from an SSH command always means SSH connection failure, not a remote process failure
 
+
+---
+
+### Pattern 22: Bootstrap hits 3600s wait timeout because traefik-rgw is stuck in error due to find/delete charm bug
+
+**Applies to:** `sunbeam_deploy` step, `sunbeam cluster bootstrap` phase
+
+**Symptom (in GitHub Actions log):**
+```text
+subprocess.CalledProcessError: Command
+  ['ssh', '-t', ..., 'sunbeam', 'cluster', 'bootstrap', ...]
+returned non-zero exit status 1.
+```
+
+**In `generated/sunbeam/output.log`:**
+```text
+wait timed out after 3599.999999234s
+...
+'traefik-rgw': AppStatus(
+  app_status=StatusInfo(current='error', message='hook failed: "update-status"', since='...'),
+)
+```
+
+**In `generated/sunbeam/juju_debug_log_openstack.txt`:**
+```text
+unit-traefik-rgw-0: ... ERROR unit.traefik-rgw/0.juju-log Uncaught exception while in charm code:
+Traceback (most recent call last):
+...
+  File ".../traefik.py", line 731, in delete_dynamic_configs
+    self._container.exec(
+...
+ops.pebble.ExecError: non-zero exit code 1 executing ['find', '/opt/traefik/juju', '-name', '*.yaml', '-delete']
+```
+
+**Root cause:** The `traefik-k8s` charm executes `find /opt/traefik/juju -name '*.yaml' -delete` during dynamic config deletion. If the directory does not exist, `find` exits with status 1, raising an exception in the charm and leaving the unit in an `error` state. During `sunbeam cluster bootstrap`, the `wait` command waits for the model to reach an active/idle state, which never happens because of this error. After exactly 1 hour (3600s), the wait command times out and fails the deployment.
+
+**Key signals:**
+- `wait timed out after 3599.999...` in `output.log`
+- `traefik-rgw` in `error` state in Juju status
+- `ops.pebble.ExecError: non-zero exit code 1 executing ['find', ...]` in Juju debug logs for `traefik-rgw`
+
+**How to confirm:**
+```bash
+grep "wait timed out after 3599" generated/sunbeam/output.log
+grep -A 5 "traefik-rgw" generated/sunbeam/juju_status_openstack.txt
+grep "executing \['find', '/opt/traefik/juju'" generated/sunbeam/juju_debug_log_openstack.txt
+```
+
+---
+
+### Pattern 23: cinder-volume service start-limit-hit during rapid subordinate relation hooks
+
+**Applies to:** `sunbeam_deploy` step, `sunbeam cluster join` phase on `tor3-sqa-shared_maas` (or any substrate with multiple nodes joining)
+
+**Symptom (in GitHub Actions log):**
+```text
+subprocess.CalledProcessError: Command
+  ['ssh', ..., 'solqa-shared-maas-server-10.maas', '--', 'sunbeam', 'configure', '-m', 'manifest.yaml']
+returned non-zero exit status 1.
+```
+
+**In `generated/sunbeam/output.log`:**
+```text
+wait timed out after 1799.9999993330002s
+...
+'cinder-volume/3': UnitStatus(
+  workload_status=StatusInfo(current='active', since='06 Jun 2026 16:08:42Z'),
+  juju_status=StatusInfo(current='idle', since='06 Jun 2026 16:22:26Z', version='3.6.23'),
+  machine='6',
+  public_address='10.241.32.115',
+  subordinates={
+    'cinder-volume-ceph/3': UnitStatus(
+      workload_status=StatusInfo(
+        current='blocked',
+        message="(workload) Error in charm (see logs): snap change 'configure-snap' id 54 failed with status Undo",
+        since='06 Jun 2026 16:09:04Z',
+      ),
+      juju_status=StatusInfo(current='idle', since='06 Jun 2026 16:09:04Z', version='3.6.23'),
+      public_address='10.241.32.115',
+    ),
+  },
+),
+```
+
+**Root cause:**
+During parallel node joining, rapid successive execution of peer or subordinate relation hooks (e.g., `peers-relation-changed` / `peers-relation-joined`) on `cinder-volume-ceph` calls `snap_svc.set()` to write configuration to the `cinder-volume` snap. Each snap configuration write triggers snapd to run the snap's `configure` hook, which restarts the `snap.cinder-volume.cinder-volume.service` via systemd. When multiple hooks fire in rapid succession (e.g. 6 restarts in < 8 seconds), they exceed systemd's default start limit rate-limiting (typically `StartLimitBurst=5` in `10s`). Systemd then flags the service with `start-limit-hit` and refuses further start requests. This causes the snapd `configure-snap` task to fail, raising a Juju/charm exception, leaving `cinder-volume-ceph` permanently blocked, and preventing the Juju model from converging before the join timeout (30 minutes) expires.
+
+**Key signals:**
+- `sunbeam cluster join` or configure fails with `wait timed out after 1799.99...s` or similar.
+- `cinder-volume-ceph/N` (and/or `cinder-volume-ceph` app status) is `blocked` with `message="(workload) Error in charm (see logs): snap change 'configure-snap' id <id> failed with status Undo"` or `Error`.
+- Node-local `var/log/syslog` shows `snap.cinder-volume.cinder-volume.service: Start request repeated too quickly` and `Failed with result 'start-limit-hit'`.
+- Node-local Juju log (`unit-cinder-volume-ceph-N.log`) shows a Python traceback with `charms.operator_libs_linux.v2.snap.SnapError: snap change 'configure-snap' id <id> failed with status Error/Undo` originating from `snap_svc.set()` in `configure_snap`.
+
+**How to confirm:**
+```bash
+# Check if cinder-volume-ceph is blocked with the configure-snap error
+grep -n "configure-snap.*failed with status" generated/sunbeam/output.log
+
+# Extract the sosreport for the failing machine (the one running the blocked cinder-volume-ceph/N unit)
+# Check its syslog for start-limit-hit
+grep -n "start-limit-hit\|repeated too quickly" var/log/syslog
+```
+
+**Timeline signature:**
+```text
+16:03:29  cinder-volume-ceph/3 unit started on machine 6 (server-19)
+16:08:54  peers-relation-changed hook completes on cinder-volume-ceph/3; starts next hook
+16:08:54  snapd runs configure hook for cinder-volume snap; stops/starts cinder-volume service (1st time)
+16:08:56  peers-relation-joined hook triggers next config write
+16:08:56  snapd stops/starts cinder-volume service (2nd time)
+16:08:57  peers-relation-changed hook triggers next config write
+16:08:57  snapd stops/starts cinder-volume service (3rd time)
+16:08:59  peers-relation-joined hook triggers next config write
+16:08:59  snapd stops/starts cinder-volume service (4th time)
+16:09:00  peers-relation-changed hook triggers next config write
+16:09:00  snapd stops/starts cinder-volume service (5th time)
+16:09:01  peers-relation-joined hook triggers next config write
+16:09:02  systemd: "Start request repeated too quickly", failed with "start-limit-hit"
+16:09:02  snapd task 53 fails; cinder-volume-ceph/3 logs "snap change 'configure-snap' id 53 failed with status Error"
+16:09:04  retry fails; cinder-volume-ceph/3 logs status Undo (change 54)
+16:38:09  sunbeam cluster join times out after 1800s wait
+```
+
+**Observed in:**
+- Run `27064385644` (UUID: `be56a82b-7c39-4c8a-81a6-861fd439aa53`, `tor3-sqa-shared_maas dh1_j8_2`, machine `6` / `solqa-shared-maas-server-19.maas`, openstack snap `2024.1/beta`, 2026-06-06).
+

@@ -95,3 +95,31 @@ using successfully.
 - The important distinction is **runner reachability succeeded, guest reachability failed**.
 - Runner logs may also show an `sshuttle` process on the GitHub runner for the Sunbeam API VIPs; treat that as further proof that runner-side access does not guarantee identical reachability from the newly booted Juju controller VM.
 
+
+### Pattern 2: sshuttle tunnel dies but daemon hangs, causing bare openstack commands to fail
+
+**Symptom:**
+```
+Failed to discover available identity versions when contacting https://10.241.38.135/openstack-keystone/v3. Attempting to parse version from URL.
+Could not find versioned identity endpoints when attempting to authenticate. Please check that your auth_url is correct. Unable to establish connection to https://10.241.38.135/openstack-keystone/v3: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))
+##[error]Process completed with exit code 1.
+```
+This happens immediately at the start of the `juju_sunbeam_controller` step.
+
+**Root cause:** The `sshuttle` daemon running on the GitHub runner loses its underlying SSH connection to the MAAS node (often hours earlier). However, the Python `sshuttle` daemon process does not exit, so it keeps the `iptables` REDIRECT rules in place. When the runner tries to reach the Sunbeam VIP, the traffic is sent to the hung `sshuttle` daemon, which immediately rejects it with a TCP RST.
+Because `.github/actions/builds/juju_sunbeam_controller/action.yml` contains a bare `openstack image list` command *before* its robust retry loop, `set -e` causes the script to abort instantly upon encountering the `ConnectionResetError`.
+
+**Evidence to look for:**
+- `generated/github-runner/run.log`: The step fails instantly on `openstack image list` with `ConnectionResetError`.
+- `generated/sshuttle_metallb_range.txt`: Shows `sshuttle` is still `UP`.
+- `var/log/auth.log` (on the node `sshuttle` was routing through, usually node 31): Look for the original `sshuttle` SSH connection (established around `18:34`) closing hours before the failure (e.g. `pam_unix(sshd:session): session closed for user ubuntu`).
+
+**Recommendations:**
+1. Update the MetalLB sshuttle monitor in `sunbeam_prepare_env/action.yml` to actively probe
+   through the tunnel instead of just checking PID existence. The virtual_maas tunnel monitor
+   does this correctly — it runs `ssh 10.241.144.2 "date;hostname"` every 60 seconds and
+   writes the output (including SSH errors) to `sshtest.txt`, so broken connections show up
+   naturally. The MetalLB monitor should do the same: replace `ps -p "$SSHUTTLE_PID"` with
+   `ssh -o ConnectTimeout=5 <gateway_node> true` and record the result in
+   `sshuttle_metallb_range.txt`. The gateway node is reachable from the moment sshuttle
+   starts; no OpenStack dependency.
