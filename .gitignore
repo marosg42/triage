@@ -3,3 +3,5 @@ tmp/
 .mcp.json
 list.txt
 files/
+.env
+processed.txt
