@@ -1,0 +1,1 @@
+for i in $(./triage_status_for_agent.py) ; do echo "Found $i" ; if [ ! -e outputs/${i}-analysis.md ]; then echo "$(date) Processing ${i}" | tee -a processed.txt; sudo rm -rf files/* ; opencode run "analyze workflow ${i}" --model google/gemini-3.5-flash  ; fi ; done
