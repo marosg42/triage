@@ -486,6 +486,11 @@ still be settling for many minutes. Evidence from a second occurrence:
   7 nodes, solqa-shared-maas-server-01.maas as bootstrap, single topology, 2026-03-31 main
   branch, snap rev 956 — Traefik "publish_url" warnings continued 13 min after last join,
   configure called 105s after last warning; same 55s rapid failure with empty stderr)
+- Run 27069154195 (UUID: 2e1db7ce-c3d8-4f99-80a1-b4375a3f0249, tor3-sqa-shared_maas dh1_j8_2,
+  7 nodes, solqa-shared-maas-server-10.maas as bootstrap, single topology, 2026-06-06 main
+  branch, openstack snap rev 1005 — configure called immediately after cluster list confirmed;
+  rapid failure in 65s with HTTP 502 Bad Gateway on first Neutron API requests; Traefik logs
+  confirmed `relation ingress not ready` warnings around configuration start)
 
 ---
 
