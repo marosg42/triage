@@ -1005,3 +1005,63 @@ grep "segfault" <work_dir>/maas-logs/<ip>/var/log/syslog
 **Remediation:** Pass `intel_iommu=off` or `intel_iommu=pt` as a kernel parameter via MAAS for the affected node, or disable `bcache` if IOMMU is strictly required on that hardware.
 
 **From run:** 26719477705 (UUID 5eb8d383-dd43-47da-9175-481d8e62aa89, tor3-sqa-dedicated_maas dh1_j2, Ubuntu 24.04 noble, linux 6.8.0-124-generic, node `anahuac` / HP ProLiant DL320e Gen8).
+
+### Pattern 15: Infra node hardware failure / disk corruption → `apt-get` exit code 100 → `rsync` fails (Logs wiped by retries)
+
+**Symptom (GitHub Actions log):**
+```
+subprocess.CalledProcessError: Command '['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', '-o', 'LogLevel=ERROR', 'ubuntu@10.241.128.2', '--', 'sudo', "bash --login -c 'DEBIAN_FRONTEND=noninteractive apt-get -q install -y qemu-system libvirt-daemon-system libvirt-clients bridge-utils'"]' returned non-zero exit status 100.
+##[error]Process completed with exit code 1.
+```
+
+**Root cause:** A physical infra node (e.g. `anahuac`) suffers from hardware instability or disk corruption. During the `Redeploy dedicated MAAS infra nodes` step (via Terraform), the node fails to deploy and enters the `Failed deployment` state. The pipeline's `prepare_for_retry.sh` script wipes the cluster to try again, which completely destroys the MAAS logs of the failure. On a subsequent retry, the node may finally transition to `Deployed`, but its filesystem or dpkg database is corrupted/locked. When FCE connects via SSH to run `apt-get install`, it fails with exit code `100`. Finally, the node becomes so unresponsive that the log collection `rsync` fails completely.
+
+**Distinguishing evidence:**
+
+```bash
+# 1. Previous attempts failed in Terraform deployment for the node
+grep "unexpected state 'Failed deployment'" <work_dir>/run_<id>_failed.log
+# Expect multiple occurrences matching the failed node before the final apt-get failure
+
+# 2. apt-get failed with exit code 100 during maas:preflight
+grep "returned non-zero exit status 100" <work_dir>/<uuid>/generated/maas/log.txt
+
+# 3. Log collection (rsync) failed for the node
+grep "rsync.*failed" <work_dir>/<uuid>/generated/github-runner/run.log
+```
+
+**Remediation:** Remove the faulty physical node from the cluster (e.g., exclude `anahuac` from `dh1_j2`) as it is unable to reliably complete a MAAS deployment or run basic package installations.
+
+---
+
+### Pattern 16: Initial automatic public mirror import blocks FCE's internal mirror configuration → slow public download exceeds 30-minute timeout
+
+**Symptom (FCE maas/log.txt):**
+```
+2026-06-11-15:32:13 root INFO Boot resources still importing, sleeping 30 seconds.
+... (repeats for 30 minutes) ...
+Exception: Timed out waiting for regions to import images.
+##[error]Process completed with exit code 1.
+```
+
+**Root cause:**
+When the MAAS snap is newly installed and initialized, it immediately schedules and starts an automatic boot resources import from the default public mirror (`images.maas.io`). Shortly after, FCE's `configure_maas` step attempts to update the boot source to the fast internal Canonical mirror (`http://10.141.186.167/maas/images/ephemeral-v3/stable/`) and trigger a fresh import. 
+
+However, since the automatic public mirror import is already active and downloading large `squashfs` image files (each around 400-500 MB), the MAAS API rejects/skips the new import request, logging `Skipping import as another import is already running.` in the syslog. The initial import from the slow public mirror continues. In environments where the external network bandwidth to `images.maas.io` is severely bottlenecked, the public mirror downloads take longer than the 30-minute hardcoded poll timeout of FCE, leading to a timeout exception before any nodes can be enlisted or commissioned.
+
+**Evidence to look for:**
+- **FCE log.txt** shows the `configure_maas` step timed out waiting for regions to import images:
+  `Exception: Timed out waiting for regions to import images.`
+- **MAAS syslog** shows that the second import request was skipped:
+  `maas.bootresources: [info] Skipping import as another import is already running.`
+- **MAAS syslog** shows long durations for public mirror downloads:
+  `Workflow has completed ... id: download-bootresource:upstream:..., elapsed_time_seconds: 1800+`
+- **MAAS syslog** shows that the active download requests are going to `images.maas.io` rather than the configured internal mirror:
+  `HTTP Request: GET http://images.maas.io/ephemeral-v3/stable/.../squashfs`
+
+**Remediation:**
+1. Configure MAAS to initialize with the internal boot source directly, or wait/cancel the default automatic import before applying the FCE mirror configuration.
+2. Increase the hardcoded 30-minute timeout in FCE's `wait_for_not_boot_resource_importing` helper.
+3. Improve external network speed to `images.maas.io` from the cluster infrastructure.
+
+**From run:** 27356099991 (UUID f051f1f8-6a10-49b7-8d91-ca8d43b79ef5, tor3-sqa-dedicated_maas dh1_j6, MAAS 3.7.2-17972-g.35e297c4d / snap rev 41649, 2026-06-11).

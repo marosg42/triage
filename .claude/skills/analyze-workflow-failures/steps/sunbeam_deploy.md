@@ -960,12 +960,9 @@ grep -E 'k8s/0|k8s/[123]|sunbeam-machine/0' generated/sunbeam/juju_status_openst
 **Observed in:**
 - Run 25987960158 (UUID: 9407930c-870f-4485-9768-8211e5ff610c, tor3-sqa-shared_maas dh1_j9_1,
   branch `aipoc`, openstack snap rev 1000, k8s v1.32.11 / rev 4754, 2026-05-17)
-<<<<<<< Updated upstream
-=======
 - Run 26338138903 (UUID: 71805006-220e-4a49-a12b-89e235c314ba, tor3-sqa-shared_maas dh1_j9_1,
   branch `main`, control-plane joins for servers 32/34/36 failed with `Failed to get k8s nodes to update`,
   but post-failure snapshots showed those nodes `Ready` in Kubernetes and `running` in the cluster list; k8s v1.32.13, 2026-05-23)
->>>>>>> Stashed changes
 
 ---
 
@@ -1113,12 +1110,9 @@ cat generated/sunbeam/juju_status_openstack-machines.txt
 - Run 25940588751 (UUID: 72cea7f3-5a7d-4baa-ac17-ebb88051fc40, tor3-sqa-testflinger cluster_3, branch `main`, `barbos.maas` roles `control,compute`, openstack snap `2024.1/beta`, 2026-05-15); stderr showed `wait timed out after 1799.999998577s`, the timeout snapshot already had `barbos` machine `3` with `k8s/2` and `openstack-hypervisor/2` active, `openstack-hypervisor/3` on later machine `5` still `executing` `ceph-access-relation-changed`, and final `sunbeam_cluster_list.txt` / `kubectl_get_node.txt` showed `barbos` fully joined and Ready.
 - Run 25928796613 (UUID: 02c1a007-6d9c-4a94-b412-12f62b3bceb8, tor3-sqa-testflinger cluster_3, branch `main`, `napple.maas` roles `control,storage` timed out first after `1199.9999981559995s`, then `fizeau.maas` roles `control,compute` later raised the terminal `CalledProcessError` after `1799.9999977789994s`; both nodes were present in final `sunbeam_cluster_list.txt`, final `kubectl_get_node.txt` showed `fizeau` and `napple` Ready, and final `juju_status_openstack-machines.txt` showed `cinder-volume/2`, `openstack-hypervisor/2`, and all `k8s/*` units `active idle`.
 - Run 25932491932 (UUID: a14f61b1-6b73-400c-9e54-5761c4e197e9, tor3-sqa-testflinger cluster_1, branch `main`, `ancientminister.maas` roles `control,compute`, openstack snap `2024.1/beta`, 2026-05-15); stderr showed `wait timed out after 1799.9999987379997s`, the timeout snapshot had `cinder-volume/3` still `waiting` on backends with `cinder-volume-ceph/3` `executing` `ceph-access-relation-changed` and `openstack-hypervisor/3` still `executing` `ovsdb-cms-relation-changed`, but final `sunbeam_cluster_list.txt`, `kubectl_get_node.txt`, and `juju_status_openstack-machines.txt` showed `ancientminister` fully joined and the model converged.
-<<<<<<< Updated upstream
-=======
 - Run 26252890519 (UUID: 6ec1d2ac-4bba-4447-b337-a0dfa1acec2b, tor3-sqa-testflinger cluster_1, branch `main`, `doble.maas` roles `control,storage`, openstack snap `2024.1/beta`, 2026-05-21); stderr showed `wait timed out after 1799.9999971770003s`, the timeout snapshot had `openstack-hypervisor/1` still `executing` `nova-service-relation-changed` and `openstack-hypervisor/2` still `executing` `ceph-access-relation-changed` / `waiting` on certificates, `juju_debug_log_openstack-machines.txt` admitted machines 4, 5, and 6 after the timeout, and final `sunbeam_cluster_list.txt`, `kubectl_get_node.txt`, and `juju_status_openstack-machines.txt` showed `doble` fully joined and the model converged.
 - Run 26338143617 (UUID: f20d40df-9e36-4c83-aaec-fd4953ea7236, tor3-sqa-testflinger cluster_1, branch `main`, `ledian.maas` roles `control,compute`, openstack snap `2024.1/beta`, 2026-05-23); stderr showed `wait timed out after 1799.999997808s`, the timeout snapshot already had `ledian` machine `2` `started`, `k8s/1` `active` / `Ready` since `18:30:43Z`, and `openstack-hypervisor/2` still `executing` `config-changed hook`; final `sunbeam_cluster_list.txt`, `kubectl_get_node.txt`, `juju_status_openstack-machines.txt`, and `juju_status_openstack.txt` showed `ledian` fully joined and the cluster converged.
 - Run 26657349467 (UUID: 87f87610-4c3f-4b6d-ad7e-7c17b5d2483a, tor3-sqa-testflinger cluster_3, branch `main`, `cajal.maas` roles `control,compute`, `euler.maas` roles `control,storage`, openstack snap `2024.1/beta`, 2026-05-29); `euler` timed out first after `1799.999997515s`, then `cajal` timed out 34s later after `1799.999997676s`, but the timeout snapshot already had machines `0..3` started with `k8s/2` on `cajal` `waiting: Waiting for Cluster token` and `openstack-hypervisor/2` still `executing` / `waiting` on certificates, while later joins for `jasperoid`, `fava`, `gravetusk`, and `barbos` all completed; final `sunbeam_cluster_list.txt`, `kubectl_get_node.txt`, `juju_status_openstack-machines.txt`, and `juju_status_openstack.txt` showed full cluster convergence.
->>>>>>> Stashed changes
 
 ---
 
@@ -1177,8 +1171,6 @@ grep -n 'neutron.*healthcheck failed' generated/sunbeam/juju_status_openstack.tx
 
 ---
 
-<<<<<<< Updated upstream
-=======
 ### Pattern 10: Charmhub docker-registry token API 503 causes bootstrap-time ImagePullBackOff across multiple charms
 
 **Applies to:** `sunbeam_deploy` step, `sunbeam cluster bootstrap` phase
@@ -2004,8 +1996,6 @@ tar -xJOf $CLAY "$SYS" | grep -n 'snap.openstack-hypervisor.hook.configure\|appa
 - Run 26650775097 (UUID: 359ada6c-45c2-489d-a06a-9314b8244ffd, tor3-sqa-testflinger cluster_1, branch `main`, `ledian.maas` roles `storage`, earlier node `claydol.maas` `openstack-hypervisor/3` blocked in `ceph-access-relation-changed`, 2026-05-29).
 
 ---
-
->>>>>>> Stashed changes
 _Add more patterns below as they are discovered._
 
 ## Notes
@@ -2143,4 +2133,149 @@ grep -n "start-limit-hit\|repeated too quickly" var/log/syslog
 
 **Observed in:**
 - Run `27064385644` (UUID: `be56a82b-7c39-4c8a-81a6-861fd439aa53`, `tor3-sqa-shared_maas dh1_j8_2`, machine `6` / `solqa-shared-maas-server-19.maas`, openstack snap `2024.1/beta`, 2026-06-06).
+
+---
+
+### Pattern 24: `sunbeam cluster bootstrap` timeout (3600s) due to extreme network slowness / slow Kubernetes image pulls
+
+**Applies to:** `sunbeam_deploy` step, `sunbeam cluster bootstrap` phase
+
+**Symptom (in GitHub Actions log):**
+```text
+subprocess.CalledProcessError: Command
+  ['ssh', '-t', ..., 'sunbeam', 'cluster', 'bootstrap', ...]
+returned non-zero exit status 1.
+```
+
+**In `generated/sunbeam/output.log`:**
+```text
+wait timed out after 3599.9999990779997s
+...
+'cinder': AppStatus(
+  app_status=StatusInfo(current='waiting', message='(workload) Payload container not ready', ...),
+)
+...
+'glance': AppStatus(
+  app_status=StatusInfo(current='waiting', message='(workload) Payload container not ready', ...),
+)
+```
+
+**In `generated/sunbeam/kubectl_get_pod.txt`:**
+```text
+openstack                       cinder-0                              0/3     PodInitializing   0          78m
+openstack                       glance-0                              0/2     PodInitializing   0          78m
+openstack                       nova-0                                0/5     PodInitializing   0          78m
+```
+
+**In `kubectl_get_--all-namespaces_true_events` (or node-local Kubernetes events):**
+```text
+openstack        18m         Normal    Pulled             pod/keystone-0                               Successfully pulled image "..." in 52m35.853s (52m35.853s including waiting). Image size: 453646878 bytes.
+openstack        9m4s        Normal    Pulled             pod/neutron-0                                Successfully pulled image "..." in 1h1m51.983s (1h1m51.983s including waiting). Image size: 520329800 bytes.
+```
+
+**Root cause:**
+During `sunbeam cluster bootstrap`, Juju deploys the core OpenStack services to Kubernetes, and the bootstrap command waits for all services to converge. However, due to extreme network bandwidth throttling or slowness on the deployed bootstrap node, pulling container images from registry.jujucharms.com and other remote registries takes an extraordinarily long time (e.g., up to 20 minutes for a 200MB image, and over 1 hour for a 520MB image). Because multiple large images must be pulled, several core pods (`cinder-0`, `glance-0`, `nova-0`) are still stuck in `PodInitializing` state when the hardcoded 3600-second (1 hour) bootstrap wait timeout is exceeded, causing the entire bootstrap process to fail.
+
+**Key signals:**
+- `wait timed out after 3599.999...s` inside `sunbeam cluster bootstrap` in `output.log`.
+- `cinder`, `glance`, and `nova` apps are in `waiting` state with `(workload) Payload container not ready`.
+- `cinder-0`, `glance-0`, and `nova-0` pods are stuck in `PodInitializing` state for the entire run duration.
+- Kubernetes events show extremely long image pull durations (e.g. 15–60+ minutes per image pull).
+
+**How to confirm:**
+```bash
+# Verify the 3600s wait-timeout inside bootstrap:
+grep -n "wait timed out after 3599" generated/sunbeam/output.log
+
+# Check for pods stuck in PodInitializing:
+grep -n "PodInitializing" generated/sunbeam/kubectl_get_pod.txt
+
+# Inspect the image pull durations in Kubernetes events:
+grep -n "Successfully pulled image" files/sos-node1/sos_commands/kubernetes/cluster-info/k8s_kubectl_get_--all-namespaces_true_events
+```
+
+**Observed in:**
+- Run `27095291029` (UUID: `ffd87a5a-ac26-45ce-a8dc-6dc5e33e903b`, `tor3-sqa-virtual_maas-cluster_5`, machine `node1.dh1-j6.tor3-sqa-dedicated-maas.solutionsqa`, openstack snap `2024.1/beta`, 2026-06-07).
+
+---
+
+### Pattern 25: `sunbeam prepare-node-script` fails with "No external connectivity" to `api.charmhub.io`
+
+**Applies to:** `sunbeam_deploy` step, concurrent node preparation phase (`install_snap_and_prepare_nodes`) on `tor3-sqa-shared_maas`
+
+**Symptom (in GitHub Actions log):**
+```text
+subprocess.CalledProcessError: Command '['ssh', ..., 'solqa-shared-maas-server-14.maas', '--', 'set', '-ex', ';', 'sudo', 'snap', 'install', 'openstack', '--channel', '2024.1/beta', ';', 'sunbeam', 'prepare-node-script', '|', 'bash', '-x']' returned non-zero exit status 1.
+```
+
+**In `generated/sunbeam/output.log`:**
+```text
+2026-06-10 23:18:07,012 - ERROR - [localhost] Command failed: ssh ... solqa-shared-maas-server-14.maas -- ...
+ERROR: No external connectivity. Set HTTP_PROXY, HTTPS_PROXY, NO_PROXY
+       in /etc/environment and re-run this command.
+```
+
+**Root cause:**
+During the concurrent preparation of non-bootstrap nodes, the `sunbeam prepare-node-script` check for external internet connectivity (`curl -s -m 10 -x '' api.charmhub.io`) fails. In this environment, no proxy is configured in `/etc/environment` for any of the nodes, and a local network/routing/interface issue or packet-drop unreachability on `server-14`'s gateway (`10.242.32.1` via `enp1s0f1.100`) prevented direct external network connection. Because any node preparation failure is fatal, `deploy_sunbeam.py` immediately aborts the deployment process before cluster bootstrap/joining can begin.
+
+**Key signals:**
+- Exit code **1** (not 255) — remote node script exited 1.
+- Error message: `ERROR: No external connectivity. Set HTTP_PROXY, HTTPS_PROXY, NO_PROXY in /etc/environment...` in `output.log`.
+- Only one node in the parallel batch fails (e.g. `server-14.maas`), while other nodes successfully download/install Juju and configure themselves, proving the issue is isolated to a single machine's gateway/external interface rather than a wider network outage.
+
+**How to confirm:**
+```bash
+# Check the output.log for the prepare-node-script failure:
+grep -n "ERROR: No external connectivity" generated/sunbeam/output.log
+
+# Extract the affected node's sosreport and check default routing table:
+tar -xJf generated/sunbeam/sosreport-solqa-shared-maas-server-14-*.tar.xz -C /tmp/ "*/sos_commands/networking/ip_route_show_table_all"
+cat /tmp/*/sos_commands/networking/ip_route_show_table_all
+```
+
+**Observed in:**
+- Run `27307632798` (UUID: `051f5efe-978c-4d53-9914-77eb62b766e8`, `tor3-sqa-shared_maas-dh1_j8_2`, machine `solqa-shared-maas-server-14.maas`, openstack snap `2024.1/beta`, 2026-06-10).
+
+---
+
+### Pattern 26: Parallel `sunbeam cluster join` false negative — 1800s wait expires because joining unit is stuck 'Waiting for Cluster token' due to Juju controller relation event propagation delay
+
+**Applies to:** `sunbeam_deploy` step, `sunbeam cluster join` phase on `tor3-sqa-testflinger`
+
+**Symptom (in GitHub Actions log):**
+```text
+subprocess.CalledProcessError: Command
+  ['ssh', ..., 'octopot.maas', '--', 'sunbeam', 'cluster', 'join', '<token>', '--role', 'control', '--role', 'compute', '--accept-defaults']
+returned non-zero exit status 1.
+```
+
+**In `generated/sunbeam/output.log`:**
+```text
+Application 'k8s' is not ready: TimeoutError("wait timed out after 1799.999999358s\nStatus(\n  model=ModelStatus(name='openstack-machines' ...)")
+```
+
+**Root cause:**
+The parallel cluster joins wait up to 1800 seconds (30 minutes) for the `openstack-machines` Juju model to converge. In this run, the joining unit `k8s/2` on `napple` successfully processed its local relation joined hook for `cluster:3` at `16:04:18`, but the Juju controller delayed delivering the corresponding `RelationJoinedEvent` to the leader unit `k8s/0` until `16:34:57` (a delay of over 30 minutes). Because of this delay, `k8s/0` could not grant the cluster token for `k8s/2` until `16:34:59`, keeping `k8s/2` stuck in `Waiting for Cluster token` status and stalled model convergence. This is a **false negative failure** because the model successfully converged to `active/idle` shortly after the wait-for timeout expired.
+
+**Key signals:**
+- Exit code **1** (not 255) — remote join script timed out.
+- The `k8s` application is in `waiting` status with `Waiting for Cluster token` message.
+- `unit-k8s-0.log` on the bootstrap node shows `RelationJoinedEvent` for the joining node's unit processed much later than when the joining node logged joining the relation in `unit-k8s-2.log`.
+- Post-failure snapshots show all nodes fully `Ready` and `active`.
+
+**How to confirm:**
+```bash
+# Outer wait-for timeout symptom:
+grep -n "wait timed out after 1799" generated/sunbeam/output.log
+
+# Leader unit k8s/0 processed relation joined event extremely late (e.g. 16:34):
+tar -xJOf generated/sunbeam/sosreport-<bootstrap-node>-*.tar.xz "*/var/log/juju/unit-k8s-0.log" | grep -n "cluster:3: Reconcile event=<RelationJoinedEvent"
+
+# Joining unit k8s/2 joined relation on its side much earlier (e.g. 16:04):
+tar -xJOf generated/sunbeam/sosreport-<joining-node>-*.tar.xz "*/var/log/juju/unit-k8s-2.log" | grep -n "cluster:3: Reconcile event=<RelationJoinedEvent"
+```
+
+**Observed in:**
+- Run `27283706450` (UUID: `f6374793-e6be-452c-bbd5-d1c66854b668`, `tor3-sqa-testflinger-cluster_3`, machine `octopot.maas` / `napple.maas`, openstack snap `2024.1/beta`, 2026-06-10).
+
 

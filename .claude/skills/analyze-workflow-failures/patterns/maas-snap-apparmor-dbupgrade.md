@@ -112,3 +112,6 @@ attempt to open at import time. This causes `maas-region dbupgrade` to crash bef
 migration runs. The snap hook framework doesn't detect this as a failure in Variant B because
 the hook's shell wrapper exits cleanly.
 
+
+---
+

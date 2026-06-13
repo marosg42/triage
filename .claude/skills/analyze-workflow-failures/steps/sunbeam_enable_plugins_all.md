@@ -253,29 +253,19 @@ wait timed out after 899.9999983639991s
 )
 ```
 
-<<<<<<< Updated upstream
-**Root cause:** `sunbeam enable telemetry` waited for the OpenStack exporter to become active, but `openstack-exporter/0` never considered its `logging` relation ready. The exporter pod repeatedly logged `The relation 'logging' is not ready yet` and `No Loki endpoints available`. Swift relation data shows why: on the exporter's `logging` relation, `opentelemetry-collector/1` and `/2` published Loki `endpoint` and `public_address`, but `opentelemetry-collector/0` published only addresses and never exposed an endpoint. Because the exporter charm treated the logging integration as incomplete, Juju waited the full 900 seconds and `sunbeam enable telemetry` failed even though the telemetry/orchestration pods were otherwise running.
-=======
-**Root cause:** `sunbeam enable telemetry` waited for the OpenStack exporter to become active, but `openstack-exporter/0` never considered its `logging` relation ready. The exporter pod repeatedly logged `The relation 'logging' is not ready yet` and `No Loki endpoints available`. Swift relation data shows why: on the exporter's `logging` relation, at least one `opentelemetry-collector` unit failed to publish the full Loki endpoint data (`endpoint` and `public_address`) even though peer collector units did. Because the exporter charm treated the logging integration as incomplete, Juju waited the full 900 seconds and `sunbeam enable telemetry` failed even though the telemetry/orchestration pods were otherwise running.
->>>>>>> Stashed changes
+**Root cause:** `sunbeam enable telemetry` waited for the OpenStack exporter to become active, but `openstack-exporter/0` never considered its `logging` relation ready. The exporter pod repeatedly logged `The relation 'logging' is not ready yet` and `No Loki endpoints available`. Swift relation data shows why: on the exporter's `logging` relation, at least one `opentelemetry-collector` unit failed to publish the full Loki endpoint data (`endpoint` and `public_address`) even though peer collector units did (for example, `opentelemetry-collector/0` published only addresses and never exposed an endpoint). Because the exporter charm treated the logging integration as incomplete, Juju waited the full 900 seconds and `sunbeam enable telemetry` failed even though the telemetry/orchestration pods were otherwise running.
 
 **Evidence to look for:**
 - GitHub log: first telemetry enable succeeded earlier via observability (`OpenStack telemetry application enabled.`), but the later explicit `sunbeam enable -m manifest.yaml telemetry` timed out after 900s
 - GitHub log / `output.log`: `openstack-exporter` app and `openstack-exporter/0` unit are the only non-active entries, both showing `(logging) integration incomplete`
 - `generated/sunbeam/pods_openstack_logs.tgz` → `logs-openstack-openstack-exporter-0.txt`: repeated `logging:269: The relation 'logging' is not ready yet.` and `No Loki endpoints available`
-<<<<<<< Updated upstream
-- `generated/sunbeam/show_units_openstack.txt`: relation `269` (`openstack-exporter:logging` ↔ `opentelemetry-collector:receive-loki-logs`) shows `opentelemetry-collector/0` missing `endpoint` / `public_address`, while `/1` and `/2` have both fields
-=======
-- `generated/sunbeam/show_units_openstack.txt`: on the `openstack-exporter:logging` ↔ `opentelemetry-collector:receive-loki-logs` relation, one collector unit is missing `endpoint` / `public_address` while the peer collector units have both fields (first observed: `/0`; later confirmation: `/1`)
->>>>>>> Stashed changes
+- `generated/sunbeam/show_units_openstack.txt`: on the `openstack-exporter:logging` ↔ `opentelemetry-collector:receive-loki-logs` relation, one collector unit is missing `endpoint` / `public_address` while the peer collector units have both fields (e.g., `opentelemetry-collector/0` missing fields while `/1` and `/2` have both).
 - `generated/sunbeam/pods_openstack_logs.tgz` → `logs-openstack-opentelemetry-collector-0.txt`: receive-loki-logs hooks ran and patched the statefulset successfully (`HTTP/1.1 200 OK`), so the failure is not a crashed collector pod
 
 **First observed:** run 25970616074 (UUID 2797dd8d-b892-43c2-9cde-391cdf3eb610, tor3-sqa-shared_maas dh1_j8_1, branch aipoc, 2026-05-17)
 
 ---
 
-<<<<<<< Updated upstream
-=======
 ### Pattern 6: observability enable false failure — remote command printed success, then SSH transport/DNS failed
 
 **Symptom (GitHub Actions log):**
@@ -626,7 +616,51 @@ tor3-sqa-testflinger cluster_1, branch main, Juju 3.6.23, 2026-05-30)
 
 ---
 
->>>>>>> Stashed changes
+---
+
+### Pattern 16: ubuntu-pro enable failed due to expired HPE SDR repository GPG key on hardware-observer nodes
+
+**Symptom (GitHub Actions log):**
+```
+subprocess.CalledProcessError: Command '['sunbeam', 'enable', '-m', 'generated/sunbeam//manifest.yaml', 'pro', '***']' returned non-zero exit status 1.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "products/sunbeam/enable_features.py", line 484, in <module>
+    enable_plugins(node, plugins, env_config)
+  File "products/sunbeam/enable_features.py", line 454, in enable_plugins
+    enable_pro(node, config, manifest)
+  File "products/sunbeam/enable_features.py", line 331, in enable_pro
+    apply_workaround(node)
+  File "products/sunbeam/enable_features.py", line 301, in apply_workaround
+    jst = yaml.safe_load(no_ansi)
+...
+yaml.scanner.ScannerError: while scanning a simple key
+```
+
+**Root cause:**
+On physical HPE server nodes (such as those in `tor3-sqa-dedicated_maas`), the `hardware-observer` charm detects the presence of an HPE Smart Array controller (`ssacli` in `hw_available`). To install HPE monitoring tools, it configures the HPE SDR repository (`deb https://downloads.linux.hpe.com/SDR/repo/mcp stretch/current non-free`).
+However, the GPG signature for the HPE SDR repository is invalid or has expired (`EXPKEYSIG C208ADDE26C2B797`). This causes any subsequent `apt-get update` on that node to fail with error status 100.
+When the `ubuntu-pro` charm attempts to run its `config-changed` hook, it executes `apt-get update` through the operator library (`apt.add_package("ubuntu-advantage-tools", update_cache=True)`). Because of the broken HPE repository, the update fails, and the `ubuntu-pro` unit enters `error` status.
+This prevents `sunbeam enable pro` from succeeding. The pipeline then attempts to run `apply_workaround` which parses `juju status --format yaml` to locate blocked units. However, because the Juju status output is too long, the terminal output gets truncated/cut-off mid-word (`rel`), resulting in a `ScannerError` during YAML loading and crashing the pipeline step.
+
+**Evidence to look for:**
+- GitHub log: Traceback showing `ScannerError: while scanning a simple key` during `apply_workaround` in `enable_features.py`
+- Juju debug log (`juju_debug_log_openstack-machines.txt`):
+  - `ubuntu-pro/<unit>` / `ubuntu-advantage` unit in `error` status with `hook failed: "config-changed"`
+  - `hardware-observer/<unit>` unit in `error` status with `hook failed: "install"`
+  - `apt-get update` fails with:
+    `W: GPG error: https://downloads.linux.hpe.com/SDR/repo/mcp stretch/current Release: The following signatures were invalid: EXPKEYSIG C208ADDE26C2B797 Hewlett Packard Enterprise Company`
+    `E: The repository 'https://downloads.linux.hpe.com/SDR/repo/mcp stretch/current Release' is not signed.`
+    `subprocess.CalledProcessError: Command '['apt-get', 'update']' returned non-zero exit status 100.`
+
+**First observed:** run 27256365951 (UUID 0b746604-e2db-499a-8139-ab2e053f1074, tor3-sqa-dedicated_maas dh1_j6, branch main, 2026-06-10)
+
+**Second observed:** run 27316556546 (UUID 9028cd2b-47d8-403f-94cc-44e84b45131e, tor3-sqa-testflinger cluster_1, branch main, 2026-06-11)
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes

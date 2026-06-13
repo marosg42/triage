@@ -39,6 +39,7 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── sunbeam_launch_vm.md                               ← per-step logs, patterns, grep hints
 │   ├── juju_sunbeam_controller.md                         ← per-step logs, patterns, grep hints
 │   ├── deploy_charm_mysql.md                           ← per-step logs, patterns, grep hints
+│   ├── deploy_charm_postgresql.md                      ← per-step logs, patterns, grep hints
 │   ├── openstack.md                                    ← per-step logs, patterns, grep hints
 │   ├── prepare_shared_maas_clusters_for_deployment.md ← per-step logs, patterns, grep hints
 │   ├── redeploy_dedicated_maas_infra_nodes.md        ← per-step logs, patterns, grep hints
@@ -47,7 +48,8 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── kubernetes-maas.md                             ← per-step logs, patterns, grep hints
 │   ├── kubernetes_aws.md                              ← per-step logs, patterns, grep hints
 │   ├── kubeflow_terraform.md                          ← per-step logs, patterns, grep hints
-│   └── sunbeam_enable_plugins_all.md                  ← per-step logs, patterns, grep hints
+│   ├── sunbeam_enable_plugins_all.md                  ← per-step logs, patterns, grep hints
+│   └── sunbeam_test_plugins.md                        ← per-step logs, patterns, grep hints
 └── patterns/
     └── maas-snap-apparmor-dbupgrade.md  ← deep-dive on specific recurring bug
 ```
@@ -424,8 +426,9 @@ From the logs, extract:
    grep -h "41404\|auto-refresh\|post-refresh\|taskrunner" <work_dir>/maas-logs/*/var/log/syslog 2>/dev/null | grep "2026-" | sort
    ```
 4. **Correlate timing**: Did the failure happen *during* or *after* the refresh?
-5. **Check AppArmor denials**: `DENIED` entries in syslog can indicate hook failures
-6. **Check DB migration state**: Use dump.dmp to inspect schema
+5. **Check DB migration state**: Use dump.dmp to inspect schema
+6. **Check AppArmor denials**: `DENIED` entries in syslog can indicate hook failures, but **beware of false positives**.
+   - *Note: AppArmor `DENIED` messages (e.g., for `/etc/gss/mech.d/`) are often benign probes by underlying libraries (like `psycopg2` checking for Kerberos auth) that gracefully fall back. Do not assume an AppArmor denial is the root cause without corroborating evidence. Always look for underlying exceptions, database concurrency issues, or serialization failures first.*
 
 ## Output Format
 

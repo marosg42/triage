@@ -289,4 +289,23 @@ Error:
   - Shows `Starting step 'Add machines'` followed exactly 300 seconds later by a `TimeoutError` traceback pointing to `aiohttp.streams.readany`.
 
 **Observed in:** run 26710851237 (UUID 0a948444-837e-4dd6-8d31-4642581e907e, tor3-sqa-dedicated_maas dh1_j2).
+
+### Pattern 8: `sunbeam cluster deploy` fails because Juju application deployment gets a Charmhub connection EOF
+
+**Symptom:**
+```
+Error configuring cloud: TerraformException()
+Error: terraform command failed: /snap/openstack/1015/bin/terraform apply -input=false -auto-approve -no-color -json
+stderr: 
+```
+
+**Root cause:** During the Terraform apply phase of `sunbeam cluster deploy`, the Juju controller attempts to contact Charmhub via `https://api.charmhub.io/v2/charms/refresh` to resolve and fetch the required charms (such as `glance-k8s`). If Charmhub abruptly closes the connection (`EOF`) or experiences a transient service disruption, Juju's internal resolution attempt limit is exceeded. This causes the Juju Terraform provider to fail to create the application resource, bubbling up as a generic `TerraformException()` inside the sunbeam execution runner.
+
+**Evidence to look for:**
+- `generated/sunbeam/all_snaps.tgz` -> `home/ubuntu/snap/openstack/common/etc/<cluster-env>/deploy-openstack/terraform-apply-*.log`:
+  - Logs a Juju provider Client Error: `[ERROR] provider.terraform-provider-juju_...: Response contains error diagnostic: diagnostic_severity=ERROR diagnostic_summary="Client Error" ... diagnostic_detail="Unable to create application, got error: resolving with preferred channel: attempt count exceeded: Post \"https://api.charmhub.io/v2/charms/refresh\": EOF"`
+  - Specifically targets a module (e.g., `vertex "module.glance.juju_application.service" error: Client Error`).
+- GitHub Actions log: `sunbeam cluster deploy` fails with `TerraformException()` and empty stderr.
+
+**Observed in:** run 27377752955 (UUID b5182e15-8b17-49fd-b78c-9a37c947ac7d, tor3-sqa-dedicated_maas dh1_j6, branch `main`, 2026-06-11).
 >>>>>>> Stashed changes
