@@ -95,6 +95,9 @@ def main():
 
     print(f"Found {len(untriaged)} untriaged runs.", file=sys.stderr)
 
+    if not untriaged:
+        sys.exit(1)
+
     for p in untriaged:
         print(p["uuid"])
 
