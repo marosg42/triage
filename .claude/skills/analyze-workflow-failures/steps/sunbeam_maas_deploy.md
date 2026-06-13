@@ -117,9 +117,7 @@ Process completed with exit code 1.
 - The same timeout snapshot shows all machine-model apps and units `active`/`idle`
 - Post-failure `generated/sunbeam/juju_status_openstack-infra.txt`, `juju_status_openstack-machines.txt`, and `juju_status_openstack.txt` show all models active; only some `mysql` units still report `Agent=executing` while workload stays `active`
 
-<<<<<<< Updated upstream
-**Observed in:** run 25950047554 (UUID 543ceda1-ee88-4631-ad00-8604348744c6, tor3-sqa-dedicated_maas dh1_j2, branch `main`, addon `sunbeam_2024.1_beta`, 2026-05-16).
-=======
+
 **Observed in:** run 25950047554 (UUID 543ceda1-ee88-4631-ad00-8604348744c6, tor3-sqa-dedicated_maas dh1_j2, branch `main`, addon `sunbeam_2024.1_beta`, 2026-05-16); run 26309155094 (UUID 43e3ca63-51e1-4731-81de-985c417f3206, tor3-sqa-dedicated_maas dh1_j6, branch `aipoc`, manifest channels `2024.1/beta`, 2026-05-22) — timeout snapshot already showed `openstack-machines` `available`, all listed apps `active`, and post-failure Juju/Kubernetes snapshots remained healthy.
 
 ---
@@ -250,7 +248,7 @@ Process completed with exit code 1.
 - `suicune.dh1-j2.tor3-sqa-dedicated-maas.solutionsqa-curtin_config.txt`: `driver_51_osd_zap` is present in the host-specific curtin late commands for `suicune`
 
 **Observed in:** run 26687730876 (UUID 99a74612-fa41-4cd0-8013-a63535b1db5b, tor3-sqa-dedicated_maas dh1_j2, branch `main`, 2026-05-30) — `suicune` failed `driver_51_osd_zap` on host `noma` at `17:47:26Z`; run 26677146886 (UUID cb9f85e4-5326-4528-bac0-fb34bec2c24d, tor3-sqa-dedicated_maas dh1_j2, branch `main`, 2026-05-30) — `suicune` failed `driver_51_osd_zap` on host `anahuac` at `09:03:37Z`; run 26721324961 (UUID 6d4c2445-ec78-44d9-9fbc-6ad73fb19004, tor3-sqa-dedicated_maas dh1_j2, branch `main`, 2026-05-31); run 26666874596 (UUID e2855722-2c0c-4c23-8872-6a3fc72ed2ae, tor3-sqa-dedicated_maas dh1_j2, branch `main`, 2026-05-30); run 26644898503 (UUID 96f56fa7-cce5-48b5-9ec2-28a41cfbbbdf, tor3-sqa-dedicated_maas dh1_j2, branch `main`, 2026-05-29) — machine `5` / instance `akxawm` (`suicune`) failed `driver_51_osd_zap` on host `anahuac` at `17:23:19Z`, with MAAS syslog logging `ceph-bluestore-tool zap-device` returning `Operation not permitted` before the node flipped to `Failed deployment`.
->>>>>>> Stashed changes
+
 
 ---
 
