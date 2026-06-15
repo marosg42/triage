@@ -5,7 +5,7 @@ while uuids=$(./triage_status_for_agent.py); do
     if [ ! -e outputs/${i}-analysis.md ]; then
       echo "$(date) Processing ${i}" | tee -a processed.txt
       sudo rm -rf files/*
-      opencode run "analyze workflow ${i}" --model google/gemini-3.5-flash
+      timeout -k 1m 15m opencode run "analyze workflow ${i}" --model google/gemini-3.5-flash
       processed_any=1
     fi
   done
