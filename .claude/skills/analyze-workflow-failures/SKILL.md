@@ -26,6 +26,7 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── juju_k8s_controller.md                          ← per-step logs, patterns, grep hints
 │   ├── juju_kubernetes_controller.md                   ← per-step logs, patterns, grep hints
 │   ├── juju_maas_controller.md                         ← per-step logs, patterns, grep hints
+│   ├── k8s_cloud.md                                    ← per-step logs, patterns, grep hints
 │   ├── juju_openstack_controller.md                    ← per-step logs, patterns, grep hints                         ← per-step logs, patterns, grep hints
 │   ├── maas.md                                         ← per-step logs, patterns, grep hints
 │   ├── magpie.md                                       ← per-step logs, patterns, grep hints
@@ -38,6 +39,7 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── sunbeam_test_with_validation_plugin_no_features.md  ← per-step logs, patterns, grep hints (log-finding guidance applies to ALL sunbeam_test_with_validation_plugin_* variants)
 │   ├── sunbeam_launch_vm.md                               ← per-step logs, patterns, grep hints
 │   ├── juju_sunbeam_controller.md                         ← per-step logs, patterns, grep hints
+│   ├── landscape.md                                    ← per-step logs, patterns, grep hints
 │   ├── deploy_charm_mysql.md                           ← per-step logs, patterns, grep hints
 │   ├── deploy_charm_postgresql.md                      ← per-step logs, patterns, grep hints
 │   ├── openstack.md                                    ← per-step logs, patterns, grep hints
