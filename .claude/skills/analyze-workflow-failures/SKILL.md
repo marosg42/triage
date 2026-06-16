@@ -107,67 +107,55 @@ subagents or download anything until the user confirms. If no file exists, conti
 
 ### On Entry: Start Parallel Work
 
-- **First**, launch the `jobs.json` fetch as a background Haiku subagent — it is small (~50 KB) and returns quickly with the `run_id` and step list you need to drive the rest of the analysis
-- **Immediately after**, launch Step A (Swift bundle download) as a second background Haiku subagent — it is large and benefits from maximum head-start
+- **First**, run Step A (artifact download) — it downloads all files including `jobs.json` and benefits from maximum head-start. Launch it as a background subagent so GitHub log analysis can proceed in parallel.
 
 ---
 
-### Step A. Download Swift Artifacts (Background Subagent)
+### Step A. Download Artifacts (Background Subagent)
 
 > **Launch this as a background subagent the instant UUID is known.** Do not wait for it to
 > complete before continuing with GitHub log analysis — it runs in parallel.
-> **Use model `cgoogle/gemini-3.5-flash`** — this is pure mechanical work (MCP call + curl + tar),
+> **Use model `claude-haiku-4.5`** — this is pure mechanical work (script execution),
 > no reasoning required.
 
-> **⚠️ If the Swift MCP server is unavailable or returns an error:**
-> Stop immediately. Report to the user that Swift is unavailable and that analysis cannot
-> proceed without the artifacts. Do **not** attempt workarounds, alternative download methods,
-> or partial analysis based only on GitHub logs.
+> **⚠️ If the download script fails:**
+> Stop immediately. Report the error to the user. Do **not** attempt partial analysis based
+> only on GitHub logs.
 
-**Before launching the subagent**, determine the work directory. Use `files/` in the current workspace.
-Pass this path explicitly in the subagent prompt as `<work_dir>`.
+The work directory is `files/` in the current workspace (`/home/ubuntu/triage/files/`).
 
-The subagent must:
+The subagent must run the download script from the workspace root:
 
-1. Call `swift-mcp-stage_uuid_bundle` with `uuid = "<UUID>"` — this returns a download URL
-2. Download the bundle to the session files directory (passed as `<work_dir>` in the prompt):
-   ```bash
-   mkdir -p <work_dir>
-   curl -fsSL <url_from_tool> -o <work_dir>/<UUID>.tgz
-   ```
-3. Extract it into the same directory:
-   ```bash
-   mkdir -p <work_dir>/<UUID>
-   tar -xzf <work_dir>/<UUID>.tgz -C <work_dir>/<UUID> --strip-components=1
-   ```
-   This produces `<work_dir>/<UUID>/` preserving the full directory tree.
-4. Report success: `"Done — <work_dir>/<UUID>/ is ready"` (or report any error)
+```bash
+cd /home/ubuntu/triage
+UUID=<UUID> bash download_uuid.sh
+```
 
-> **Do NOT delete `<work_dir>/<UUID>/` after analysis.** Leave it in place — the user is
-> responsible for cleanup. Having all logs available persistently is more important than
-> disk tidiness.
+This will:
+1. Fetch the file index from the object storage for the given UUID
+2. Download all artifact files into `files/<UUID>/` preserving the full directory tree
+3. Print `"Done. Files saved to files/<UUID>/"` on success
 
-By the time you reach Step 4 (Log Analysis), `<work_dir>/<UUID>/` should already be populated.
+> **Do NOT delete `files/<UUID>/` after analysis.** Leave it in place — the user is
+> responsible for cleanup.
+
+By the time you reach Step 4 (Log Analysis), `files/<UUID>/` should already be populated.
 If the subagent is still running, wait for it before proceeding to Step 4.
 
 ---
 
-### 1. Obtain the GitHub Run ID from Swift
+### 1. Obtain the GitHub Run ID from Downloaded Artifacts
 
-The `jobs.json` fetch subagent (launched on entry) provides the `run_id`. Parse it:
+Once Step A completes, parse `jobs.json` from the downloaded artifacts:
 
 ```bash
 python3 -c "
 import json, sys
-jobs = json.load(open('<work_dir>/<uuid>-jobs.json'))
+jobs = json.load(open('files/<UUID>/generated/github-runner/jobs.json'))
 for j in jobs['jobs']:
     print(j['name'], j['conclusion'], j['run_id'])
 "
 ```
-
-> **Why `stage_object` not `get_object`?** `jobs.json` is ~50 KB — `get_object` returns it
-> inline and the output gets truncated to a temp file, requiring extra parsing steps.
-> `stage_object` returns a download URL so you can `curl` it straight to disk.
 
 `jobs.json` contains the full GitHub API job response, including `run_id`, `run_url`,
 `html_url`, branch, conclusion, and per-step details. It also makes a useful quick triage
@@ -196,20 +184,20 @@ Parse output to identify all jobs and their statuses (✓ = success, X = failure
 find the first failed step, and note the substrate, cluster, and branch from context.
 
 ```bash
-gh run view <run_id> --log-failed 2>&1 > <work_dir>/run_<run_id>_failed.log
-wc -l <work_dir>/run_<run_id>_failed.log
+gh run view <run_id> --log-failed 2>&1 > files/run_<run_id>_failed.log
+wc -l files/run_<run_id>_failed.log
 ```
 
 > **Prefer `--log-failed`** over `--log` — it's much smaller and focused on failures.
 
 Then find the actual error:
 ```bash
-grep -n "##\[error\]\|Process completed with exit code" <work_dir>/run_<run_id>_failed.log
+grep -n "##\[error\]\|Process completed with exit code" files/run_<run_id>_failed.log
 ```
 
 Extract context around the first exit code error:
 ```bash
-sed -n '<start>,<end>p' <work_dir>/run_<run_id>_failed.log | grep -v "^\(Run the pipeline.*\*\*\*\)$" | cat
+sed -n '<start>,<end>p' files/run_<run_id>_failed.log | grep -v "^\(Run the pipeline.*\*\*\*\)$" | cat
 ```
 
 ### 3. Know Your Substrate
@@ -256,22 +244,22 @@ filter to that window:
 
 ```bash
 # Get the job start time from jobs.json
-python3 -c "import json; j=json.load(open('<work_dir>/<uuid>-jobs.json')); [print(x['started_at'], x['name']) for x in j['jobs']]"
+python3 -c "import json; j=json.load(open('files/<UUID>/generated/github-runner/jobs.json')); [print(x['started_at'], x['name']) for x in j['jobs']]"
 
 # Filter MAAS syslog to the relevant time window (e.g., 2026-03-19T18:)
-grep "2026-03-19T18:" <work_dir>/maas-logs/10.241.144.2/var/log/syslog | head -20
+grep "2026-03-19T18:" files/maas-logs/10.241.144.2/var/log/syslog | head -20
 ```
 
-### 4. Use Logs from Swift
+### 4. Use Logs from Downloaded Artifacts
 
 If Step A (background subagent) has not yet reported completion, wait for it before proceeding.
-All artifacts are already available under `<work_dir>/<uuid>/` — no further download is needed.
+All artifacts are already available under `files/<UUID>/` — no further download is needed.
 
-> `<work_dir>/<uuid>/` is **not** cleaned up after analysis. Leave it as-is for the user.
+> `files/<UUID>/` is **not** cleaned up after analysis. Leave it as-is for the user.
 
 Key layout:
 ```
-<work_dir>/<uuid>/
+files/<UUID>/
 ├── FCB.md
 ├── config/          — nodes.yaml, networks.yaml, overlays, etc.
 ├── generated/
@@ -296,13 +284,13 @@ Key layout:
 
 ```bash
 # Tail of all log streams:
-cat <work_dir>/<uuid>/generated/lastlines.txt
+cat files/<UUID>/generated/lastlines.txt
 
 # GitHub runner metadata (step names, conclusions):
-python3 -m json.tool <work_dir>/<uuid>/generated/github-runner/jobs.json | head -60
+python3 -m json.tool files/<UUID>/generated/github-runner/jobs.json | head -60
 
 # FCE MAAS build log:
-cat <work_dir>/<uuid>/generated/maas/log.txt
+cat files/<UUID>/generated/maas/log.txt
 ```
 
 #### 4a-i. SSH tunnel health check (virtual_maas only)
@@ -323,7 +311,7 @@ Connection closed by 10.241.144.2 port 22
 **How to use it:**
 
 ```bash
-cat <work_dir>/<uuid>/generated/sshtest.txt
+cat files/<UUID>/generated/sshtest.txt
 ```
 
 - **If no errors appear**: the tunnel held throughout the run — MAAS logs are fully trustworthy.
@@ -346,12 +334,12 @@ cat <work_dir>/<uuid>/generated/sshtest.txt
 
 The full per-node MAAS logs are inside a nested tgz within the bundle:
 ```bash
-MAAS_TGZ=$(ls <work_dir>/<uuid>/generated/maas/logs-*.tgz 2>/dev/null | head -1)
-mkdir -p <work_dir>/maas-logs && tar -xzf ${MAAS_TGZ} -C <work_dir>/maas-logs
+MAAS_TGZ=$(ls files/<UUID>/generated/maas/logs-*.tgz 2>/dev/null | head -1)
+mkdir -p files/maas-logs && tar -xzf ${MAAS_TGZ} -C files/maas-logs
 
 # Map IPs to hostnames:
 # virtual_maas: hostnames are infra1/infra2/infra3; dedicated_maas: Pokémon names (e.g. leafeon)
-for d in <work_dir>/maas-logs/*/; do
+for d in files/maas-logs/*/; do
   ip=$(basename $d)
   echo -n "$ip: "
   head -1 $d/var/log/syslog 2>/dev/null | grep -oP '\S+ kernel' | grep -oP '^\S+' || echo "(no syslog)"
@@ -382,15 +370,15 @@ The archive contains per-node directories (e.g., `10.241.144.2/`, `10.241.144.3/
 
 ```bash
 # Find all instances of a specific error across all nodes
-grep -rh "error_string" <work_dir>/maas-logs/*/var/log/syslog 2>/dev/null | sort
+grep -rh "error_string" files/maas-logs/*/var/log/syslog 2>/dev/null | sort
 
 # Get clean timeline (exclude noise)
-grep -h "2026-03-22T01:0" <work_dir>/maas-logs/10.x.x.x/var/log/syslog 2>/dev/null \
+grep -h "2026-03-22T01:0" files/maas-logs/10.x.x.x/var/log/syslog 2>/dev/null \
   | grep -v "kernel\|audit\|apparmor\|named\|maas-machine\|#011\|twisted\|django\|maasserver\|provisioning" \
   | sort
 
 # Count errors by process
-grep -rh "error_string" <work_dir>/maas-logs/*/var/log/syslog 2>/dev/null \
+grep -rh "error_string" files/maas-logs/*/var/log/syslog 2>/dev/null \
   | grep -oP 'infra\d+ maas-regiond\[\d+\]' | sort | uniq -c | sort -rn
 ```
 
@@ -425,7 +413,7 @@ From the logs, extract:
 2. **Check snap versions**: MAAS snap auto-refreshes during runs can cause mid-run failures
 3. **Check snap refresh events** in syslog:
    ```bash
-   grep -h "41404\|auto-refresh\|post-refresh\|taskrunner" <work_dir>/maas-logs/*/var/log/syslog 2>/dev/null | grep "2026-" | sort
+   grep -h "41404\|auto-refresh\|post-refresh\|taskrunner" files/maas-logs/*/var/log/syslog 2>/dev/null | grep "2026-" | sort
    ```
 4. **Correlate timing**: Did the failure happen *during* or *after* the refresh?
 5. **Check DB migration state**: Use dump.dmp to inspect schema
@@ -547,8 +535,8 @@ use `outputs/<run_id>-analysis.md` as a fallback.
 ## Limitations
 
 - **Requires authentication**: `gh` CLI must be authenticated
-- **Swift access**: Required — if the Swift MCP server is unavailable, stop and report; do not attempt workarounds
-- **Bundle size**: The full UUID bundle can be 50–100 MB — `stage_uuid_bundle` + `curl` (launched as background subagent) handles this efficiently; the MAAS logs tgz inside is an additional nested archive to extract separately
+- **Swift access**: Required — artifacts are downloaded directly from object storage via `download_uuid.sh`. If the download fails, stop and report; do not attempt workarounds
+- **Bundle size**: The full UUID bundle can be 50–100 MB — `download_uuid.sh` (launched as background subagent) handles this efficiently
 - **Domain knowledge**: Some errors require specific MAAS/Juju/Sunbeam product knowledge
 - **Diagnosis only**: This skill identifies root causes. The failing infrastructure is gone — no fix can be applied retroactively. Findings should be used to inform future preventive action.
 
