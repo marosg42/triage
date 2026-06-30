@@ -276,6 +276,184 @@ idle TCP timeout tore down the SSH session when the config script produced no ou
 
 ---
 
+### Pattern 4: Bootstrap succeeds, but enable-ha times out (3rd HA member stuck in PXE boot)
+
+**Symptom (in `generated/juju_maas_controller/log.txt`):**
+The `bootstrap` sub-step completes successfully (`Bootstrap complete, controller ...
+is now available`), then `enable_ha` runs and `wait_for_ready` polls `juju status`
+until it raises:
+```
+Traceback (most recent call last):
+  ...
+  File ".../layers/jujucontrollerlayer.py", line 281, in build
+    raise Exception("Timed out waiting for juju ha to become ready.")
+Exception: Timed out waiting for juju ha to become ready.
+```
+
+**Root cause:** `juju enable-ha` asks MAAS for two more controller members to form a
+3-node HA quorum. One of the new members never finishes provisioning — it sits in
+MAAS state `Deploying: Performing PXE boot` and never advances to `Installing OS` /
+`Configuring OS` / `Deployed`. With only 2 of 3 members up, HA never becomes ready
+and `wait_for_ready` hits its timeout (~30 min).
+
+**Distinguishing characteristics:**
+- `bootstrap` sub-step **succeeds** (unlike Patterns 1/2/3, which fail during bootstrap)
+- Failure is in the **`wait_for_ready`** sub-step, after `enable_ha`
+- Error is the literal string `Timed out waiting for juju ha to become ready.`
+- In the status polls, one controller machine is stuck at
+  `'message': 'Deploying: Performing PXE boot'` for the entire window while the
+  others reach `Deployed`
+
+**How to confirm quickly:**
+```bash
+L=files/<UUID>/generated/juju_maas_controller/log.txt
+grep -nE "Finished step: juju_maas_controller:bootstrap|Starting step: juju_maas_controller:wait_for_ready|Timed out waiting for juju ha" "$L"
+# Per-machine stuck-state histogram (replace 7frnkm with the instance-id seen):
+grep -oE "'<instance-id>'[^}]*'message': '[^']*'" "$L" | grep -oE "'message': '[^']*'" | sort | uniq -c
+```
+
+**Timing pattern (a3a71dce — tor3-sqa-shared_maas dh1_j9_1):**
+```
+00:12:14  bootstrap COMPLETE (machine 0 = cfnqa8) ✅
+00:12:14  enable_ha → allocates machine 1 (cewwd7, zone3) + machine 2 (7frnkm, zone2)
+00:12:15  wait_for_ready polling begins
+00:18:42  machine 1 Deployed; controller/1 active 00:19:23 ✅
+00:12:57  machine 2 (7frnkm) → "Deploying: Performing PXE boot" … never advances ❌
+00:41:45  final poll — machine 2 still "Performing PXE boot" (57 consecutive polls)
+00:42:15  Process completed with exit code 1
+```
+
+**Substrate:** `tor3-sqa-shared_maas dh1_j9_1` — no MAAS logs available, so the exact
+PXE/TFTP/DHCP cause cannot be confirmed from artifacts; points to an infra/node-side
+network-boot failure on the shared MAAS node backing the stuck member.
+
+**Observed in:**
+- Run 27796218691 (UUID: a3a71dce-53f0-4349-acb3-47bb843442cd, tor3-sqa-shared_maas dh1_j9_1, stuck machine 7frnkm / 10.241.37.107 / zone2)
+
+---
+
+### Pattern 5: Bootstrap + all 3 nodes deploy, but HA voting never converges (enable-ha timeout)
+
+**Symptom (in `generated/juju_maas_controller/log.txt`):**
+Identical final error to Pattern 4 (`Timed out waiting for juju ha to become ready.`
+from `jujucontrollerlayer.py` line 281), but the cause is different: **all three
+controller machines reach `Deployed`/`started`**, yet the Juju HA (MongoDB
+replica-set) never reaches a stable 3-voting-member quorum.
+
+**How to tell it apart from Pattern 4:** In Pattern 4 a MAAS machine is stuck in
+`Performing PXE boot` and never deploys. In Pattern 5 **all machines deploy fine** —
+the failure is purely in HA voting. Run the vote histogram:
+```bash
+L=files/<UUID>/generated/juju_maas_controller/log.txt
+python3 -c "
+import ast
+polls=[l for l in open('$L') if 'controller status:' in l]
+from collections import Counter
+c=Counter()
+for l in polls:
+    d=ast.literal_eval(l.split('controller status:',1)[1].strip())
+    votes=sum(1 for m in d['machines'].values() if m.get('controller-member-status')=='has-vote')
+    c[votes]+=1
+print('has-vote distribution:', dict(c))
+"
+```
+- **Pattern 5 signature:** max simultaneous `has-vote` is **2 (never 3)**; the secondary
+  members sit in `adding-vote` and the 3rd vote oscillates between machines 1 and 2.
+- **Pattern 4 signature:** one machine never leaves `Deploying: Performing PXE boot`.
+
+**Root cause:** `juju enable-ha` adds two secondary controllers; MAAS deploys them
+successfully, but Juju's peergrouper never promotes both secondaries to voting members
+at the same time. The `has-vote`/`adding-vote` flapping between the two secondaries is
+the signature of an unstable MongoDB replica set (members repeatedly failing
+heartbeat/sync), so a healthy 3-node quorum is never reached and `wait_for_ready` times
+out after ~30 min. This is a Juju-controller / Mongo HA convergence problem on the
+controller nodes — not a MAAS provisioning stall and not an FCE logic fault.
+
+**Timing pattern (f30628d1 — tor3-sqa-dedicated_maas dh1_j6):**
+```
+22:47:59  bootstrap started
+23:01:23  bootstrap COMPLETE (machine 0 = fxyd7f / juju-1) ✅
+23:01:23  enable_ha → machine 1 = bdkae3 (juju-3), machine 2 = hfkqgp (juju-2)
+23:17:10  ALL 3 machines Deployed + juju started ✅ (provisioning fine)
+23:26:04  m0 has-vote, m1 has-vote, m2 adding-vote  (2 votes)
+23:28:06  m0 has-vote, m1 adding-vote, m2 has-vote  (vote flapped; still 2)
+23:31:24  Timed out waiting for juju ha to become ready ❌
+          (over 58 polls: 1 has-vote in 47 polls, 2 has-vote in 11; never 3)
+```
+
+**Substrate:** `tor3-sqa-dedicated_maas dh1_j6`. MAAS logs are normally available for
+dedicated_maas, **but** if the post-failure `Collect logs` step also fails there will be
+no `generated/maas/logs-*.tgz` — controller MongoDB/jujud logs are then unavailable and
+the replica-set fault can only be inferred from the `juju status` vote history.
+
+**Observed in:**
+- Run 27786306863 (UUID: f30628d1-dce8-4843-8190-b3bba5070e12, tor3-sqa-dedicated_maas dh1_j6; secondaries bdkae3/hfkqgp stuck flapping adding-vote; Collect logs step also failed)
+
+---
+
+### Pattern 6: enable-ha fails because MAAS can't allocate the 3rd controller node (no free tagged machine)
+
+**Symptom (in `generated/juju_maas_controller/log.txt`):**
+Same final error as Patterns 4 and 5 (`Timed out waiting for juju ha to become ready.`),
+but the cause is a **MAAS capacity/availability** failure: one of the new HA controller
+members never gets a machine at all. In the `juju status` polls that member shows:
+```
+instance-id: pending
+juju-status: down
+machine-status message: failed to acquire node: No available machine matches
+  constraints: [... ('tags', ['juju', 'sqa-dh1_jX_Y']), ('zone', ['zoneN'])]
+  → cycles through zone1/zone2/zone3/default, then "No available machine matches constraints"
+```
+
+**How to tell it apart from Patterns 4 and 5:**
+| Signal | Pattern 6 (this) | Pattern 5 (HA flap) | Pattern 4 (PXE stall) |
+|---|---|---|---|
+| 3rd member gets a machine | ❌ never (`instance-id: pending`) | ✅ deployed | ✅ allocated, stuck in PXE |
+| Status message | "No available machine matches constraints" | all Deployed, votes flap | "Deploying: Performing PXE boot" |
+| juju-status of stuck member | `down` | `started` | `pending` |
+
+Quick check — does any member never get an instance-id?
+```bash
+L=files/<UUID>/generated/juju_maas_controller/log.txt
+python3 -c "
+import ast
+last=[l for l in open('$L') if 'controller status:' in l][-1]
+d=ast.literal_eval(last.split('controller status:',1)[1].strip())
+for mid,m in d['machines'].items():
+    ms=m.get('machine-status',{})
+    print(mid,'inst:',m.get('instance-id'),'juju:',m.get('juju-status',{}).get('current'),'|',(ms.get('message') or ms.get('current'))[:80])
+"
+```
+
+**Root cause:** `juju enable-ha` requests two more controller members; MAAS deploys
+the first but has **no free machine matching `tags=juju,sqa-dh1_jX_Y`** for the second.
+Juju's provisioner retries across every availability zone, exhausts its retry budget,
+and the member ends `down`/`pending`. With only 2 of 3 controllers ever existing, the
+3-node HA quorum can never form → `wait_for_ready` times out (~30 min). This is a
+shared-MAAS **capacity** problem (tagged-node pool too small, or concurrent runs holding
+the nodes), not a Juju/Mongo convergence fault and not an OS-provisioning stall.
+
+**Timing pattern (b643263b — tor3-sqa-shared_maas dh1_j8_2):**
+```
+05:50:01  bootstrap started
+05:56:08  bootstrap COMPLETE (machine 0 = f7gpny / juju-26-1-5) ✅
+05:56:09  enable_ha → machine 1 = q6k7dq (deploys OK), machine 2 = never acquired
+06:01:16  machine 1 Deployed/started
+05:56–06:26  machine 2: "No available machine matches constraints ... tags=juju,sqa-dh1_j8_2"
+            across all zones; instance-id stays "pending", juju-status "down"
+06:26:09  Timed out waiting for juju ha to become ready ❌
+          (59 polls: has-vote on 1 member in 55 polls, 2 in 4; never 3)
+```
+
+**Substrate:** `tor3-sqa-shared_maas dh1_j8_2` — no MAAS logs available. On shared MAAS
+the machine pool is shared across runs, so "No available machine" can mean the cluster
+lacks a 3rd juju-tagged node or another consumer was holding it.
+
+**Observed in:**
+- Run 27807500951 (UUID: b643263b-9bc8-4b1e-ab10-49b2cc6b5667, tor3-sqa-shared_maas dh1_j8_2; machine 2 never allocated, "No available machine matches constraints")
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes

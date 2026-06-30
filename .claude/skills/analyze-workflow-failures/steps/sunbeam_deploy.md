@@ -818,7 +818,7 @@ in iteration order after all futures are done.
 **Key signals:**
 - Exit code **1** (not 255) — remote `sunbeam cluster join` process timing out, not SSH failure
 - `wait timed out after 1799.999...s` — the 1800-second (30-minute) internal `juju wait-for model openstack-machines` (note: 1800s here vs 1200s in the cinder-volume/amqp variant — timeout constant differs between snap revisions)
-- `k8s/N` workload `waiting: Unready Pods: kube-system/ck-storage-rawfile-csi-node-*` — pods are from newly-joined nodes' DaemonSets, not yet scheduled/running
+- `k8s/N` workload `waiting: Unready Pods: kube-system/ck-storage-rawfile-csi-node-*` (or other system pods undergoing rolling update/rescheduling like `kube-system/coredns-*`) — pods are not yet scheduled or fully running/ready
 - `k8s/0` and `k8s/1` juju agents `executing: running cluster-relation-changed hook for k8s/<new>` — existing k8s units processing new member admission
 - **Two nodes fail nearly simultaneously** (within seconds of each other) — both had the same 1800s deadline starting from the same batch dispatch
 - Failed nodes' roles ARE in the cluster: check `sunbeam_cluster_list.txt`
@@ -827,9 +827,10 @@ in iteration order after all futures are done.
 **Root cause:** When multiple nodes join simultaneously as new Kubernetes worker nodes, each triggers
 `cluster-relation-changed` hooks across all existing `k8s` units to update cluster membership. In
 parallel, Kubernetes schedules new DaemonSet pods (MetalLB speaker + rawfile-CSI node) on the joining
-nodes. These DaemonSet pods take time to become `Running`, keeping `k8s/N` workload in `waiting` state
-throughout. If the per-join 1800s `juju wait-for model openstack-machines` deadline fires while
-cluster-relation-changed hooks are still executing and DaemonSet pods not yet Ready, the join exits 1.
+nodes, or triggers rolling updates/recreation of existing system pods (such as `coredns` pods). These pods
+take time to become `Running`/`Ready`, keeping `k8s/N` workload in `waiting` state throughout. If the
+per-join 1800s `juju wait-for model openstack-machines` deadline fires while cluster-relation-changed hooks are
+still executing and the pods are not yet Ready, the join exits 1.
 
 The nodes joined successfully — the failure is a **false negative**. Both `anonster` and `crustle` appear
 in the cluster list with their roles active. The model converges after the timeout fires.
@@ -878,6 +879,9 @@ grep "Node joined cluster" <work_dir>/run_<id>_failed.log
 - Run 25177679456 (UUID: a12c852e-66cb-4025-85a0-6c0a4c522977, tor3-sqa-testflinger cluster_1,
   7 Pokémon-named testflinger nodes, anonster.maas roles control+storage and crustle.maas roles
   control+compute both failing, main branch, 2026-04-30)
+- Run 28004826881 (UUID: 866db9d7-c5ac-4d6d-b785-e08aba5e2438, tor3-sqa-testflinger cluster_1,
+  7 Pokémon-named testflinger nodes, bibarel.maas roles control+storage and gardener.maas roles
+  control+compute both failing due to coredns rolling update unreadiness, main branch, 2026-06-23)
 
 ---
 
@@ -1113,6 +1117,7 @@ cat generated/sunbeam/juju_status_openstack-machines.txt
 - Run 26252890519 (UUID: 6ec1d2ac-4bba-4447-b337-a0dfa1acec2b, tor3-sqa-testflinger cluster_1, branch `main`, `doble.maas` roles `control,storage`, openstack snap `2024.1/beta`, 2026-05-21); stderr showed `wait timed out after 1799.9999971770003s`, the timeout snapshot had `openstack-hypervisor/1` still `executing` `nova-service-relation-changed` and `openstack-hypervisor/2` still `executing` `ceph-access-relation-changed` / `waiting` on certificates, `juju_debug_log_openstack-machines.txt` admitted machines 4, 5, and 6 after the timeout, and final `sunbeam_cluster_list.txt`, `kubectl_get_node.txt`, and `juju_status_openstack-machines.txt` showed `doble` fully joined and the model converged.
 - Run 26338143617 (UUID: f20d40df-9e36-4c83-aaec-fd4953ea7236, tor3-sqa-testflinger cluster_1, branch `main`, `ledian.maas` roles `control,compute`, openstack snap `2024.1/beta`, 2026-05-23); stderr showed `wait timed out after 1799.999997808s`, the timeout snapshot already had `ledian` machine `2` `started`, `k8s/1` `active` / `Ready` since `18:30:43Z`, and `openstack-hypervisor/2` still `executing` `config-changed hook`; final `sunbeam_cluster_list.txt`, `kubectl_get_node.txt`, `juju_status_openstack-machines.txt`, and `juju_status_openstack.txt` showed `ledian` fully joined and the cluster converged.
 - Run 26657349467 (UUID: 87f87610-4c3f-4b6d-ad7e-7c17b5d2483a, tor3-sqa-testflinger cluster_3, branch `main`, `cajal.maas` roles `control,compute`, `euler.maas` roles `control,storage`, openstack snap `2024.1/beta`, 2026-05-29); `euler` timed out first after `1799.999997515s`, then `cajal` timed out 34s later after `1799.999997676s`, but the timeout snapshot already had machines `0..3` started with `k8s/2` on `cajal` `waiting: Waiting for Cluster token` and `openstack-hypervisor/2` still `executing` / `waiting` on certificates, while later joins for `jasperoid`, `fava`, `gravetusk`, and `barbos` all completed; final `sunbeam_cluster_list.txt`, `kubectl_get_node.txt`, `juju_status_openstack-machines.txt`, and `juju_status_openstack.txt` showed full cluster convergence.
+- Run 27970457843 (UUID: 2143aeaa-6da2-42cd-9ec9-b0a98acb0b51, tor3-sqa-testflinger cluster_3, branch `main`, `jasperoid.maas` roles `control,compute`, `euler.maas` roles `compute,storage`, openstack snap `2024.1/beta`, 2026-06-22); `jasperoid` timed out after `1799.999997550s`, followed by `euler` timing out after `1799.999998146s` because of concurrent deployment convergence churn (while `openstack-hypervisor/3` was still busy executing relation hooks), but final snapshots of `sunbeam_cluster_list.txt` and `juju_status_openstack-machines.txt` showed complete recovery and model convergence.
 
 ---
 
@@ -2196,6 +2201,8 @@ grep -n "Successfully pulled image" files/sos-node1/sos_commands/kubernetes/clus
 
 **Observed in:**
 - Run `27095291029` (UUID: `ffd87a5a-ac26-45ce-a8dc-6dc5e33e903b`, `tor3-sqa-virtual_maas-cluster_5`, machine `node1.dh1-j6.tor3-sqa-dedicated-maas.solutionsqa`, openstack snap `2024.1/beta`, 2026-06-07).
+- Run `27979777736` (UUID: `2f3b7c99-56c9-4b1c-89c9-570208915d56`, `tor3-sqa-virtual_maas`, machine `node1`, openstack snap `3.6.24`, 2026-06-22).
+- Run `27986542426` (UUID: `796788c0-9d97-478b-8f24-7d69b9c69f66`, `tor3-sqa-virtual_maas-cluster_2`, machine `node1`, openstack snap `3.6.24` / rev 1025, 2026-06-23).
 
 ---
 

@@ -661,6 +661,39 @@ This prevents `sunbeam enable pro` from succeeding. The pipeline then attempts t
 
 ---
 
+### Pattern 17: images-sync enable false timeout — images-sync pod starts far too late, then self-recovers after the 900s wait expires
+
+**Symptom (GitHub Actions log):**
+```
+2026-06-22 23:22:24,867 - DEBUG - Enabling images-sync
+2026-06-22 23:22:24,867 - DEBUG - [localhost]: ssh ... node1 -- sunbeam enable -m manifest.yaml images-sync
+...
+wait timed out after 899.9999971350007s
+...
+'images-sync': AppStatus(
+  app_status=StatusInfo(current='waiting', message='(workload) Payload container not ready', since='22 Jun 2026 23:23:30Z'),
+)
+'images-sync/0': UnitStatus(
+  workload_status=StatusInfo(current='waiting', message='(workload) Payload container not ready', since='22 Jun 2026 23:23:30Z'),
+)
+
+subprocess.CalledProcessError: Command ['ssh', ..., 'sunbeam', 'enable', '-m', 'manifest.yaml', 'images-sync'] returned non-zero exit status 1.
+```
+
+**Root cause:** `sunbeam enable images-sync` waited only 900 seconds for the images-sync application to converge, but the `images-sync-0` workload containers did not actually start until long after the pod had already been created. Swift artifacts show the pod was created at `23:23:00Z`, yet `openstack-images-sync` only reached `startedAt` at `23:57:46Z` due to slow image pulling (indicated by `imageID: ""` in detailed pod status). The charm spent the whole failure window reporting `Payload container not ready`; once the container finally came up, the unit ran its image syncing loop, flipping active at `23:57:50Z`, about 20 minutes after the workflow step had already failed. This is therefore a false negative caused by slow workload bring-up exceeding the command's internal 900-second wait, not by a persistent crash.
+
+**Evidence to look for:**
+- GitHub log: failed command is `sunbeam enable -m manifest.yaml images-sync`
+- GitHub log: timeout snapshot shows only `images-sync` / `images-sync/0` stuck in `(workload) Payload container not ready` since `23:23:30Z`
+- `generated/sunbeam/kubectl_get_pod_detailed.txt`: `images-sync-0` created at `23:23:00Z`, but pod `Ready` only after `23:57:46Z` with workload container starting at `23:57:46Z` (with empty `imageID: ""` at `23:56:05Z`)
+- `generated/sunbeam/pods_openstack_logs.tgz` → `logs-openstack-images-sync-0.txt`: `openstack-images-sync` container starts at `23:57:46Z`, runs simplestreams sync, and sets active at `23:57:50Z`
+- `generated/sunbeam/juju_status_openstack.txt`: by log-collection time `images-sync` and `images-sync/0` are already `active`, confirming delayed self-recovery rather than a permanent failure
+- `generated/sshtest.txt`: no SSH tunnel errors during the failure window, ruling out virtual-lab connectivity loss
+
+**First observed:** run 27979769921 (UUID 45f0b16a-22aa-4c20-b158-d0e37a950eb1, tor3-sqa-virtual_maas cluster_1, branch main, 2026-06-22)
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes

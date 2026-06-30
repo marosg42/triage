@@ -1065,3 +1065,241 @@ However, since the automatic public mirror import is already active and download
 3. Improve external network speed to `images.maas.io` from the cluster infrastructure.
 
 **From run:** 27356099991 (UUID f051f1f8-6a10-49b7-8d91-ca8d43b79ef5, tor3-sqa-dedicated_maas dh1_j6, MAAS 3.7.2-17972-g.35e297c4d / snap rev 41649, 2026-06-11).
+
+---
+
+### Pattern 17: Edge MAAS snap AppArmor denies `blkid` exec → regiond crash-loops → `maas login` "Remote end closed connection"
+
+**Symptom (GitHub Actions / `generated/maas/log.txt`):**
+The FCE step `maas:login_maas_infra` fails even though `maas_install` and
+`maas_admin_setup` (createadmin/apikey) succeeded:
+
+```
+subprocess.CalledProcessError: Command '['ssh', ..., 'ubuntu@<infra1>',
+  "bash --login -c 'maas login root http://<vip>:80/MAAS <apikey>'"]'
+  returned non-zero exit status 2.
+
+STDERR:
+  usage: maas [-h] COMMAND ...
+  ...
+  Remote end closed connection without response
+```
+
+Note: `maas createadmin` and `maas apikey` succeed (they hit the DB directly),
+but `maas login` needs the HTTP API — which is down — so it prints usage and exits 2.
+
+**Root cause:** The MAAS region controller (`maas-regiond`) crash-loops on startup
+because the snap's bundled `machine-resources/amd64` helper cannot exec `blkid`.
+The snap AppArmor profile `snap.maas.pebble` is missing exec permission for
+`/usr/sbin/blkid`:
+
+```
+apparmor="DENIED" operation="exec" profile="snap.maas.pebble"
+  name="/usr/sbin/blkid" comm="amd64" requested_mask="x"
+```
+
+regiond startup aborts in `inner_start_up` → `get_or_create_running_controller`
+→ `_find_running_node` → `get_mac_addresses`/`get_ip_addr`:
+
+```
+provisioningserver.utils.shell.ExternalProcessError:
+  Command `/snap/maas/<rev>/usr/share/maas/machine-resources/amd64` returned non-zero exit status 1:
+ERROR: Failed retrieving storage information: Failed retrieving filesystem UUID from
+  device "/dev/sda1": Failed running: blkid -s UUID -o value /dev/sda1:
+  fork/exec /usr/sbin/blkid: permission denied
+```
+
+With regiond never serving, HAProxy keeps all backends DOWN and the VIP returns no
+response — hence "Remote end closed connection without response" from the CLI.
+
+**Distinguishing evidence (grep):**
+```bash
+# 1. regiond crash-loop: many identical blkid failures over several minutes
+grep -c "Failed retrieving storage information" <work_dir>/maas-logs/*/*/var/log/syslog
+
+# 2. AppArmor denial for blkid under the snap pebble profile
+grep "DENIED" <work_dir>/maas-logs/*/*/var/log/syslog | grep blkid
+
+# 3. HAProxy has no MAAS backend during the login window
+grep "no server available\|maas-api-.* is DOWN" <work_dir>/maas-logs/*/*/var/log/haproxy.log
+```
+
+**Key differentiator from Pattern 12:** Pattern 12 is a *transient* HAProxy restart
+dropping a single in-flight request (`vm-host refresh`) — the API is otherwise healthy.
+Here the API backends are DOWN for the entire window because regiond never starts.
+
+**Recommendation:** Pin the MAAS snap to a known-good stable revision instead of
+`latest/edge`, and report the missing `/usr/sbin/blkid` exec permission in the
+`snap.maas.pebble` AppArmor profile as an edge snap regression.
+
+**From run:** 27746796813 (UUID efc40c3d-c010-4531-b2de-bfff3ab02c18,
+tor3-sqa-virtual_maas cluster_4, MAAS snap rev 42119 latest/edge / Python 3.14,
+branch main, 2026-06-18).
+
+---
+
+### Pattern 18: Concurrent `fetch_manifest_and_update_cache` activities → PostgreSQL `SerializationError` → aborted transaction → `boot-resources import` returns "Workflow execution failed" (exit 2)
+
+**Symptom (GitHub Actions log / FCE log.txt):** `maas:configure_maas` fails almost immediately
+(~40s) after triggering the import — not a timeout. The CLI command itself returns non-zero:
+
+```
+2026-06-24-07:18:46 root DEBUG [localhost]: maas root boot-source update 1 url=http://10.141.186.167/maas/images/ephemeral-v3/stable/
+2026-06-24-07:18:49 root DEBUG [localhost]: maas root boot-resources import
+2026-06-24-07:19:29 root ERROR [localhost] Command failed: maas root boot-resources import
+   STDOUT follows: Workflow execution failed
+   STDERR follows: b''
+subprocess.CalledProcessError: Command '['maas', 'root', 'boot-resources', 'import']' returned non-zero exit status 2.
+```
+
+FCE traceback ends in `configuremaas.py:_ensure_boot_sources()` → `maas_cli.py:boot_resources_import()`.
+
+**Root cause:** The `maas boot-resources import` CLI synchronously executes MAAS's
+`fetch-manifest` Temporal workflow (`FETCH_MANIFEST_AND_UPDATE_CACHE_WORKFLOW`). Two
+`fetch_manifest_and_update_cache` activities run concurrently (started ~17 ms apart) and both
+issue `UPDATE maasserver_imagemanifest`. PostgreSQL aborts one with `asyncpg SerializationError:
+could not serialize access due to concurrent update`. MAAS's handler does **not** roll back the
+aborted transaction and keeps issuing SQL on it (e.g. a `SELECT` from `maasserver_notification`),
+raising `InFailedSQLTransactionError: current transaction is aborted`. This bubbles up as a
+Temporal `ActivityError` → `WorkflowFailureError: Workflow execution failed`, the region API
+returns HTTP 500, and the CLI exits status 2. This is a MAAS-side concurrency/error-handling
+defect observed on the **3.8.0~alpha1 (rev 42148, Python 3.14)** snap.
+
+**Evidence (infra1 = region/MAAS API host):**
+- infra1 syslog (`maas-temporal-worker`): two `Starting activity fetch_manifest_and_update_cache`
+  entries milliseconds apart, then
+  `ERROR Could not fetch manifest for boot source ...: SerializationError: could not serialize
+  access due to concurrent update [SQL: UPDATE maasserver_imagemanifest ...]`
+- infra1 syslog (`maas-regiond`): `Exception: Workflow execution failed` →
+  `temporalio.exceptions.ApplicationError: InFailedSQLTransactionError: current transaction is
+  aborted` → `temporalio.client.WorkflowFailureError: Workflow execution failed`
+- infra1 syslog: `POST /MAAS/api/2.0/boot-resources/?op=import HTTP/1.1 --> 500 INTERNAL_SERVER_ERROR`
+
+**Distinguishing from timeout patterns (6/7/11/16):** This is NOT a polling timeout. There are
+no `Boot resources still importing, sleeping 30 seconds` loops and no
+`Timed out waiting for regions to import images`. Failure is immediate (<1 min) and the CLI
+returns exit 2 with STDOUT `Workflow execution failed`. The secondary `404 Not Found` errors for
+`noble/.../boot-initrd` `download-bootresourcefile` activities are retried noise, not the terminal
+cause returned to the CLI.
+
+**Grep hints:**
+```bash
+# Terminal workflow failure returned to the CLI
+grep -n "Workflow execution failed ###\|InFailedSQLTransactionError\|op=import.*500" \
+  <work_dir>/maas-logs/*/var/log/syslog
+
+# The serialization conflict that started it
+grep -n "could not serialize access due to concurrent update\|Could not fetch manifest" \
+  <work_dir>/maas-logs/*/var/log/syslog
+```
+
+**Recommendation:** Report against MAAS (3.8.0~alpha1 snap) — serialize the manifest-fetch
+activity and roll back/retry on `SerializationError` instead of continuing on an aborted
+transaction. For the pipeline, pin to a stable MAAS snap revision (avoid alpha) and/or add a
+bounded retry around FCE's `boot_resources_import()` for transient 500s.
+
+**From run:** 28079848487 (UUID c85047c7-16df-46ee-be17-60bb4481c5f1,
+tor3-sqa-virtual_maas cluster_2, MAAS snap rev 42148 / 3.8.0~alpha1 / Python 3.14,
+branch main, 2026-06-24).
+
+---
+
+### Pattern 19: SSH tunnel disconnects mid-run → local `maas` commands time out with `[Errno 110] Connection timed out`
+
+**Symptom (FCE `maas/log.txt`):**
+The FCE build process hangs for over 4 minutes on a local `maas` CLI command (e.g. `maas root machine power-parameters <id>`), then crashes:
+
+```
+2026-06-24-17:24:19 root DEBUG [localhost]: maas root machine power-parameters xdrt8k
+2026-06-24-17:28:34 root ERROR [localhost] Command failed: maas root machine power-parameters xdrt8k
+...
+[Errno 110] Connection timed out
+...
+subprocess.CalledProcessError: Command '['maas', 'root', 'machine', 'power-parameters', 'xdrt8k']' returned non-zero exit status 2.
+##[error]Process completed with exit code 1.
+```
+
+The failing step is typically `maas` (Step 40) or another early MAAS step.
+
+**Root cause:**
+For `virtual_maas` substrates, the pipeline runner communicates with the isolated virtualized MAAS region API via an SSH tunnel (configured to bind the VIP to localhost or local routes). When the SSH tunnel drops mid-run, all subsequent MAAS CLI API commands attempted by FCE on the runner will block, eventually timing out after 4+ minutes with a connection timeout error.
+
+Because the SSH tunnel is down, subsequent log-collection scripts cannot reach the virtual MAAS region controllers (`infra1`, `infra2`, `infra3`). If they share an IP space with the underlying physical MAAS nodes, the log-collection script may fall back and download logs from physical nodes (with Pokémon names like `leafeon`), which are irrelevant to the virtual MAAS failure.
+
+**Distinguishing evidence:**
+1. **SSH tunnel health log shows a sudden disconnect:** `generated/sshtest.txt` will record successful connections (returning `infra1`) up to a certain timestamp, after which all entries fail with `Connection closed by <IP> port 22` or `kex_exchange_identification: Connection closed by remote host`.
+2. **MAAS CLI hangs precisely for ~4 minutes:** The timestamp gapping between the starting `DEBUG [localhost]: maas` and the resulting `ERROR [localhost] Command failed:` is more than 4 minutes.
+3. **Collected MAAS logs contain incorrect hostnames (Pokémon names):** The syslog or haproxy logs in the extracted MAAS log archive refer to physical nodes (e.g. `leafeon`) instead of `infra1`/`infra2`/`infra3`, confirming the log collector hit the underlying physical nodes because the SSH tunnel to the virtual lab was dead.
+
+**Remediation:**
+1. Implement auto-reconnection and retry loop logic for the SSH tunnel on the pipeline runner.
+2. Add a pre-flight tunnel check in the FCE MAAS command layer to fail-fast with a clear "SSH tunnel disconnected" message if `sshtest.txt` fails, rather than waiting for 4-minute command timeouts.
+
+**From run:** 28113757830 (UUID 8ed53fb4-9491-4452-8f7c-35d832470453, tor3-sqa-virtual_maas cluster_6, MAAS 3.6/beta, branch main, 2026-06-24).
+
+---
+
+### Pattern 20: Stale aborted transaction from prior workflow failures → `boot-resources import` returns "Workflow execution failed" (exit 2)
+
+**Symptom (GitHub Actions log / FCE log.txt):** `maas:configure_maas` fails ~40s after triggering
+the import — not a timeout. The CLI command returns non-zero:
+
+```
+subprocess.CalledProcessError: Command '['maas', 'root', 'boot-resources', 'import']' returned non-zero exit status 2.
+STDOUT: Workflow execution failed
+STDERR: b''
+```
+
+**Root cause:** During the preceding `maas:maas_install` step, MAAS Temporal workflows for
+existing boot resources fail due to a brief HAProxy VIP availability gap
+(`"Region not available: No route to host"`). Child workflows are cancelled with
+`ChildWorkflowError` and `ActivityError`. These cascading failures leave the database session
+in an **aborted transaction state** (`InFailedSQLTransactionError`).
+
+When `maas:configure_maas` later triggers a new `boot-resources import`, the MAAS API handler
+submits a `FetchManifestWorkflow`. The `fetch_manifest_and_update_cache` activity uses the
+**same connection pool** and hits the already-aborted transaction:
+```
+InFailedSQLTransactionError: current transaction is aborted, commands ignored until end of
+transaction block
+```
+The MAAS Temporal worker retries (attempt 2) but the transaction is permanently wedged. After
+~21 seconds, the workflow fails, the region API returns HTTP 500, and the CLI exits status 2.
+
+**Distinguishing from Pattern 18:** Pattern 18 is triggered by a concurrent `SerializationError`
+during `UPDATE maasserver_imagemanifest`. This variant is triggered by a **stale aborted
+transaction** from earlier workflow failures caused by HAProxy VIP availability gap during
+`maas_install`. The terminal symptom is the same: `InFailedSQLTransactionError` → "Workflow
+execution failed" → exit 2. Both are MAAS 3.8.0~alpha1 (rev 42148) defects.
+
+**Evidence (infra1 = region/MAAS API host):**
+- infra1 syslog (`maas-rackd`): `"Region not available: No route to host"` at the HAProxy VIP
+- infra1 syslog (`maas-temporal-worker`): Multiple `ChildWorkflowError: Child Workflow execution
+  cancelled` and `ActivityError: Activity cancelled` during maas_install
+- infra1 syslog (`maas-temporal-worker`): `fetch_manifest_and_update_cache` attempt 1 fails
+  with `InFailedSQLTransactionError`, attempt 2 fails with same error
+- infra1 syslog (`maas-regiond`): `WorkflowFailureError: Workflow execution failed`
+
+**Grep hints:**
+```bash
+# HAProxy VIP gap that triggered the cascade
+grep "No route to host.*10.241.144.5" <work_dir>/maas-logs/*/var/log/syslog
+
+# Workflow cancellations
+grep "ChildWorkflowError.*cancelled\|ActivityError.*cancelled" \
+  <work_dir>/maas-logs/10.241.144.2/var/log/syslog
+
+# Terminal workflow failure
+grep "InFailedSQLTransactionError\|Workflow execution failed" \
+  <work_dir>/maas-logs/10.241.144.2/var/log/syslog
+```
+
+**Recommendation:** Report against MAAS (3.8.0~alpha1 snap) — the Temporal worker should
+explicitly issue `ROLLBACK` and obtain a fresh connection when encountering
+`InFailedSQLTransactionError`, rather than retrying on the same wedged transaction. For the
+pipeline, investigate the HAProxy VIP availability gap during `maas_install` (region controller
+startup sequencing may briefly take the VIP offline).
+
+**From run:** 28106239752 (UUID 57e8c8cb-b8f5-4a7b-ad9b-f01ab37d9002,
+tor3-sqa-virtual_maas cluster_7, MAAS snap rev 42148 / 3.8.0~alpha1 / Python 3.14,
+branch main, 2026-06-24).

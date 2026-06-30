@@ -127,6 +127,65 @@ fault, power event) can take down all VMs simultaneously, causing:
 
 ---
 
+### Pattern 2: `juju add-model` fails with MongoDB EOF immediately after HA controller bootstrap
+
+**Symptom:**
+```
+ERROR failed to create new model: initialising model logs collection:
+cannot create index for logs collection logs.<model-uuid>: EOF
+
+subprocess.CalledProcessError: Command ['juju', 'add-model', '-c', 'foundations-maas',
+  'kubernetes-maas', 'maas_cloud'] returned non-zero exit status 1.
+```
+
+The failure happens at `create_model` — the very first step of the layer — before any
+deployment starts. The `add-model` command runs for an unusually long time (~60–70s) before
+returning the error.
+
+**Root cause:** Juju's internal MongoDB returned EOF while trying to create the log collection
+index for the new model. This occurs when the HA controller's MongoDB replica set is still
+in a settling/synchronization phase after adding a HA member. When `juju_maas_controller`
+completes and `kubernetes-maas` starts immediately, there may be only 40–60 seconds between
+the MongoDB replica set reaching `has-vote` for the final member and the first `add-model`
+call — not enough time for MongoDB replication to fully stabilize.
+
+**Key distinguishing features vs. Pattern 1 (controller crash):**
+- Failure is at `create_model`, not during `juju-wait`
+- The model IS actually created server-side (Juju workers start in debug log; model visible in post-failure status)
+- The Juju controller remains healthy post-failure (all units `active/idle`)
+- `juju_status_*.txt/json` and `juju-crashdump-*.tar.gz` are **present** (controller was reachable)
+- No SSH failures in teardown
+
+**Evidence to look for:**
+- `generated/kubernetes-maas/log.txt`: `cannot create index for logs collection logs.<uuid>: EOF`
+- `generated/kubernetes-maas/juju_status_foundations-maas_controller.txt`: all controller
+  units `active/idle` shortly after failure — controller healthy
+- `generated/kubernetes-maas/juju_status_foundations-maas_kubernetes-maas.txt`: model exists
+  but is empty (no apps/machines) — model was created server-side despite the error
+- Juju debug log (in crashdump): workers for the new model UUID starting at ~the same second
+  as the `add-model` CLI call, confirming server-side creation succeeded
+- Timing: `juju_maas_controller` step completed with HA member still `adding-vote` < 60s
+  before `kubernetes-maas` started
+
+**Investigation steps:**
+```bash
+# Confirm the specific error
+grep "cannot create index\|EOF\|add-model" generated/kubernetes-maas/log.txt
+
+# Check if model was actually created (post-failure status)
+head -5 generated/kubernetes-maas/juju_status_foundations-maas_kubernetes-maas.txt
+
+# Confirm controller was healthy
+head -20 generated/kubernetes-maas/juju_status_foundations-maas_controller.txt
+
+# Check HA timing — when did machine/2 go from adding-vote to has-vote?
+grep "adding-vote\|has-vote" generated/juju_maas_controller/log.txt | tail -5
+```
+
+**From run:** 28235638023 (UUID 44c1c826, tor3-sqa-dedicated_maas dh1_j2, branch main, 2026-06-26)
+
+---
+
 ## Notes
 
 - `vault` is always excluded from juju-wait (`-x vault`); `vault-mysql-router/0` stuck

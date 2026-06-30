@@ -187,6 +187,107 @@ issue at charm install time), the binary is missing and the hook fails with
 
 ---
 
+### Pattern 4: LXD container stuck in "Instance already exists" provisioning loop
+
+**Symptom:**
+```
+# juju-wait abort (generated/openstack/log.txt):
+ERROR:root:Machine <m>/lxd/<n> is in down for 30 minutes.
+subprocess.CalledProcessError: Command ['juju-wait', ..., '--machine-error-timeout', '1800', ...] returned non-zero exit status 1.
+
+# Host machine agent log (crashdump <m>/baremetal/var/log/juju/machine-<m>.log):
+INFO  juju.container.lxd starting new container "juju-<uuid>-<m>-lxd-<n>" (image ...)
+WARNING juju.worker.lxdprovisioner machine <m>/lxd/<n> failed to start:
+        Failed creating instance record: Instance "juju-<uuid>-<m>-lxd-<n>" already exists ... retrying
+ERROR juju.worker.lxdprovisioner cannot start instance for machine "<m>/lxd/<n>":
+        Failed creating instance record: Instance "juju-<uuid>-<m>-lxd-<n>" already exists
+```
+
+**Root cause:** Juju's LXD provisioner issues the container create; the instance record is
+created on the LXD side, but Juju never records a successful result (lost/timed-out API
+response). Every retry then fails with `Instance "..." already exists` because the orphaned
+record from the first attempt is never cleaned up. The container keeps `instance-id: pending`,
+status `down / Creating container`, and its unit stays `waiting / allocating`. If that unit is
+NOT in the juju-wait `-x` exclusion list, juju-wait's `--machine-error-timeout 1800` (30 min)
+fires and the openstack step fails. Often several containers on the **same host machine** stall
+in the same window → points to a transient LXD/host issue on that specific bare-metal node.
+
+**Evidence to look for:**
+- `<crashdump>/juju_status.txt`: `<m>/lxd/<n> down ... pending ... Creating container`; affected unit `waiting/allocating "waiting for machine"`.
+- `<crashdump>/<m>/baremetal/var/log/juju/machine-<m>.log`: repeated `Instance "..." already exists` retries ending in `cannot start instance`.
+- The host machine itself is `started/Deployed` and reachable (its `baremetal/` dir is populated) — failure is container-level, not bare-metal provisioning.
+- Model UUID prefix in the instance name matches this run's model → stale record is from THIS run's first create attempt, not a previous run.
+
+**Investigation steps:**
+1. From juju-wait error, note the stuck `<m>/lxd/<n>` and find its unit in `juju_status.txt`.
+2. Extract `machine-<m>.log` from the crashdump and grep `<m>/lxd/<n>` + `already exists`.
+3. Confirm the host machine `<m>` is healthy and check whether sibling `<m>/lxd/*` containers stalled in the same window.
+
+**Recommendation:** Transient — re-run usually succeeds. If recurring on one host, check that
+host's LXD daemon health, disk/inode pressure, and image cache, and remove orphaned
+`juju-*-<m>-lxd-*` instances Juju failed to adopt.
+
+**From run:** 28003993883 (UUID 4794cd6e, tor3-sqa-shared_maas dh1_j8_1, branch main, 2026-06-23; designate/1 on 4/lxd/2)
+
+---
+
+### Pattern 5: Host bare-metal machine has no device in a required network space (ceph LXD containers stuck)
+
+**Symptom:**
+```
+# juju-wait abort (generated/openstack/log.txt):
+ERROR:root:Machine <m>/lxd/<n> is in down for 30 minutes.
+subprocess.CalledProcessError: Command ['juju-wait', ..., '--machine-error-timeout', '1800', ...] returned non-zero exit status 1.
+
+# juju_status_foundations-maas_openstack.txt:
+<m>/lxd/<n>  down  pending  ubuntu@24.04  host machine "<m>" has no available device in space(s) "cloud-ceph-access", "cloud-ceph-replicate"
+```
+
+**Root cause:** The openstack bundle deploys ceph-related units (ceph-mon, ceph-radosgw,
+glance, gnocchi, cinder, etc.) with Juju network-space constraints such as
+`spaces=cloud-ceph-access,cloud-ceph-replicate,oam`. To give an LXD container a NIC in a
+space, the **host bare-metal machine** must have an interface/bond/VLAN linked to a MAAS
+subnet in that space. If the chosen host lacks a device in the required space, Juju cannot
+create the container NIC and the container stays `down / pending` with the explicit message
+`host machine "<m>" has no available device in space(s) "<space>"`. Containers on the same
+host that do **not** require that space start fine — so the host is up and its LXD daemon is
+healthy; only space-constrained containers stall. If the affected unit is not in the
+juju-wait `-x` exclusion list, `--machine-error-timeout 1800` (30 min) fires and the step
+fails.
+
+**Key distinguishing features:**
+- The juju status message names the missing space(s) directly — no need to infer.
+- The host machine is `started / Deployed` and reachable; sibling containers on it are up.
+- This is a **deterministic host/MAAS network configuration gap**, not transient — it will
+  recur on every run where Juju places a ceph container on that specific host. Look at the
+  host **hostname** (e.g., `solqa-shared-maas-server-19`): the same physical server can fail
+  this way across multiple runs even though its Juju machine number differs each run.
+
+**Evidence to look for:**
+- `juju_status_foundations-maas_openstack.txt`: grep `no available device in space` — lists
+  every stuck container and the missing space(s).
+- Cross-check the stuck `<m>/lxd/<n>` against its unit (grep the lxd id) — typically
+  ceph-mon/ceph-radosgw/glance/gnocchi.
+- The host machine line (`grep "^<m> "`) shows the hostname; non-ceph containers on the same
+  host are `started`.
+
+**Investigation steps:**
+1. From the juju-wait error, note the stuck `<m>/lxd/<n>`.
+2. `grep "no available device in space" juju_status_foundations-maas_openstack.txt` to list all affected containers and spaces.
+3. `grep "^<m> " juju_status_foundations-maas_openstack.txt` to get the host hostname.
+4. Map containers to units to confirm they are ceph/space-constrained apps.
+
+**Recommendation:** Fix MAAS networking on the named host so it has an interface in the
+required space(s), matching its peers; or remove/tag the host so ceph units aren't scheduled
+onto it. Not a re-run fix — it recurs until the host's MAAS network config is corrected.
+
+**From runs:** 28051182800 (UUID 2e9902cf, shared_maas, branch main, 2026-06-23; ceph-mon/0 on
+3/lxd/1 + glance/0 on 3/lxd/3, host solqa-shared-maas-server-19) and 28049265712 (UUID
+09542059, shared_maas, branch main, 2026-06-23; ceph-radosgw/0 on 6/lxd/2 + gnocchi/0 on
+6/lxd/5, same host solqa-shared-maas-server-19).
+
+---
+
 ## Notes
 
 - The `juju_status_foundations-maas_openstack.json` / `.txt` files are captured **at bundle deploy time**, not at failure time. For the authoritative post-failure status, always use the crashdump's `juju_status.txt`.
