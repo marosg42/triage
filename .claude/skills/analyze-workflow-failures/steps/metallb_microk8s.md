@@ -94,6 +94,60 @@ type.
 
 ---
 
+### Pattern 2: Metallb charm install hook failure (pod started but hook errored)
+
+**Symptom:**
+```
+DEBUG:root:metallb/0 workload status is running since ...
+DEBUG:root:metallb/0 workload status is maintenance since ... (installing charm software)
+DEBUG:root:metallb/0 juju agent status is executing since ... (running install hook)
+DEBUG:root:metallb/0 workload status is error since ...
+ERROR:root:metallb/0 failed: workload status is error
+
+subprocess.CalledProcessError: Command '['juju-wait', '-m', 'foundations-maas:juju-system-microk8s', ...]'
+returned non-zero exit status 1.
+```
+
+**Root cause:** The metallb charm install hook failed after the Kubernetes pod was
+successfully created and the container reached "running". The bundle deployment
+(`juju deploy`) completed cleanly, the charm was located in CharmHub, and the pod
+transitioned through allocating → waiting → running → maintenance before hitting
+error in ~4 seconds.
+- Could be a race condition during charm software installation
+- Could be an IP range configuration issue (e.g., range invalid or overlapping with
+  existing allocations on the cluster)
+- Could be a transient Kubernetes API error during the hook
+- The MicroK8s cluster itself appears healthy (all units `active/idle`) at
+  failure time
+
+**Note:** On `shared_maas` substrates, charm logs and kubectl events are
+unavailable because the `Collect logs` step may also fail with an FCE code bug
+(`'ForkLayer' object has no attribute 'kubeconf_path'`). This makes root-cause
+determination from GitHub logs alone difficult — the error is visible only as
+the unit transitioning to error, with no charm-level debug output.
+
+**Evidence to look for:**
+- `log.txt`: `ERROR:root:metallb/0 failed: workload status is error`
+- `log.txt`: The sequence going `running` → `maintenance` → `error` within a few
+  seconds, confirming the install hook is where it failed
+- `log.txt`: `Deploy of bundle completed.` preceding the error — confirms juju
+  deploy itself succeeded
+- `juju_status_foundations-maas_juju-system-microk8s.txt`: Unit showing
+  `maintenance / installing charm software` or `error`
+- `juju_status_foundations-maas_microk8s.txt`: MicroK8s units all `active/idle`
+- Look for a secondary failure in `Collect logs` with
+  `'ForkLayer' object has no attribute 'kubeconf_path'` — this explains missing
+  charm logs
+
+**Substrate observed:** `tor3-sqa-shared_maas`, dh1_j8_1 (2026-06-29, run 28365885178)
+
+**Recommended action:** Retry the run. If the failure recurs on the same cluster,
+check whether the configured IP range `10.241.36.130-10.241.36.134` is valid and
+available on that cluster. Also consider fixing the FCE `collect_logs` bug for
+`ForkLayer` to enable charm log collection for future diagnoses.
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes
@@ -103,7 +157,9 @@ _Add more patterns below as they are discovered._
 - On `tor3-sqa-virtual_maas`, both cluster_4 and cluster_6 showed MicroK8s API
   instability on 2026-03-24 (runs 23491280339 and 23491285216), suggesting the
   issue may be substrate-wide rather than cluster-specific.
-- A non-fatal `ERROR model foundations-maas:admin/kubernetes-maas not found`
-  appears before the main error — this is expected behaviour (FCE probes for the
-  model before attempting to create it).
+- On `tor3-sqa-shared_maas`, charm logs are often unavailable due to a secondary
+  FCE bug in `collect_logs`: `'ForkLayer' object has no attribute 'kubeconf_path'`
+  (observed in run 28365885178). When this secondary failure is present, accept
+  that the exact cause of the metallb hook failure cannot be determined from
+  GitHub logs alone.
 

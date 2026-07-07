@@ -329,6 +329,7 @@ network-boot failure on the shared MAAS node backing the stuck member.
 
 **Observed in:**
 - Run 27796218691 (UUID: a3a71dce-53f0-4349-acb3-47bb843442cd, tor3-sqa-shared_maas dh1_j9_1, stuck machine 7frnkm / 10.241.37.107 / zone2)
+- Run 28478367772 (UUID: d1379164-5e0e-483e-8a1b-e3644f806f2e, tor3-sqa-shared_maas dh1_j8_1, stuck machine qkwafx / juju-24-1-3 / zone3); notable: MAAS first reported "failed to acquire node" for zone "default" at 22:11:22Z, then retried into zone3 where a machine was allocated but stalled in PXE boot for ~30 min
 
 ---
 
@@ -451,6 +452,91 @@ lacks a 3rd juju-tagged node or another consumer was holding it.
 
 **Observed in:**
 - Run 27807500951 (UUID: b643263b-9bc8-4b1e-ab10-49b2cc6b5667, tor3-sqa-shared_maas dh1_j8_2; machine 2 never allocated, "No available machine matches constraints")
+
+---
+
+### Pattern 7: Bootstrap fails immediately with MAAS API EOF — Pacemaker VIP failover race condition (virtual_maas)
+
+**Symptom (in `generated/juju_maas_controller/log.txt`):**
+```
+2026-07-01-01:18:21 root DEBUG [localhost]: juju bootstrap ...
+2026-07-01-01:33:22 root DEBUG ERROR
+2026-07-01-01:33:22 root DEBUG  creating MAAS environ: Get "http://10.241.144.5/MAAS/api/2.0/version/": EOF
+2026-07-01-01:33:22 root ERROR [localhost] Command failed: juju bootstrap ...
+ERROR creating MAAS environ: Get "http://10.241.144.5/MAAS/api/2.0/version/": EOF
+ERROR controller foundations-maas not found
+juju controller is bootstrapped but unreachable.
+```
+
+There is a **15-minute gap** between the bootstrap command and the error. The bootstrap never
+got past the initial MAAS API connectivity check — no machine was ever allocated.
+
+**Root cause:** The `maas` step (or `Setup virtual lab`) triggered a controlled Pacemaker
+cluster reconfiguration (graceful shutdown of the primary infra node) that was still in
+progress when `juju_maas_controller` started. Specifically:
+1. The infra node holding the MAAS VIP and PostgreSQL primary was gracefully shut down by
+   the pipeline (Pacemaker `shutdown[<node>]` set by sysadmin).
+2. This triggered a Pacemaker failover: the PostgreSQL primary moved to a standby node
+   (taking ~35–60s to elect a new primary), and the VIP moved to a different infra node.
+3. During the failover, MAAS regiond returned HTTP 500 errors because the DB was unreachable.
+4. HAProxy (the VIP load balancer) restarted **5+ times** as Pacemaker reconfigured the
+   cluster, dropping every in-flight TCP connection with EOF/RST.
+5. `juju bootstrap` started at the exact wrong moment — after the `maas` step reported
+   success but before the cluster had fully stabilized. Juju retried the MAAS API connection
+   for ~15 minutes until its internal retry budget was exhausted, never succeeding.
+
+**How to distinguish from other patterns:**
+
+| Signal | Pattern 7 (this) | Pattern 1/2/3/C/D (bootstrap fails) |
+|---|---|---|
+| Error message | `creating MAAS environ: ... EOF` | `failed to bootstrap model:` or `connection refused` |
+| Bootstrap gap | ~15 min (no output between start and fail) | ~30 min (full bootstrap-timeout) or ~15-60 min |
+| Machine ever allocated? | ❌ Never | Usually yes |
+| VIP/MAAS API issues | ✅ MAAS returning 500s at bootstrap start | No |
+| Pacemaker events? | ✅ `shutdown[infra1]` just before bootstrap | Not present |
+
+**Key MAAS log signals to look for:**
+```bash
+# Pacemaker graceful node shutdown (in infra3 syslog)
+grep "shutdown\[infra" files/maas-logs/*/var/log/syslog | grep "sysadmin\|pacemaker-attrd"
+grep "pgsql-status.*HS:alone\|Master does not exist" files/maas-logs/*/var/log/syslog
+
+# HAProxy restarts in the ~5-minute window around bootstrap start
+grep "Exiting Master process\|Loading success" files/maas-logs/*/var/log/haproxy.log
+
+# MAAS HTTP 500s during the DB failover window
+grep "HTTP/1.1.*500" files/maas-logs/*/var/log/syslog | grep "maas_nginx"
+
+# Juju's final attempt — logged as HTTP 499 (client closed)
+grep "api/2.0/version.*499" files/maas-logs/*/var/log/syslog
+```
+
+**Timing pattern (ca637be6 — tor3-sqa-virtual_maas cluster_6):**
+```
+01:15:29Z  maas step starts
+01:17:49Z  maas step completes ✅
+01:17:49Z  juju_maas_controller starts
+01:17:51Z  FCE starts; juju snap switched to 4.0/candidate
+01:17:58Z  Pacemaker: shutdown[infra1] set by sysadmin
+01:17:58Z  Pacemaker: stops HAProxy on infra1; starts res_maas_vip on infra3
+01:18:00Z  PostgreSQL: "Master does not exist"; infra3 transitions HS:async → HS:alone
+01:18:14Z  Juju snap install complete
+01:18:19Z  MAAS nginx starts returning HTTP 500 (DB unavailable)
+01:18:21Z  juju bootstrap starts
+01:18:52Z  Corosync: "Node 1000 was shut down by sysadmin"; Members left: 1000 (infra1)
+01:18:56Z  infra2 promoted to PostgreSQL primary (HS:alone → PRI)
+01:18:58Z–01:22:57Z  HAProxy restarts 5+ times on infra1 (reconfiguring)
+01:19:01Z  infra3 becomes sync standby (HS:async → HS:sync)
+01:20:07Z  MAAS /MAAS/rpc/ returns HTTP 200 (DB recovered, ~1.5 min after bootstrap start)
+01:33:22Z  Juju's final attempt: nginx logs HTTP 499 Go-http-client/1.1 for /MAAS/api/2.0/version/
+01:33:22Z  juju bootstrap fails: "creating MAAS environ: ... EOF"
+```
+
+**Substrate:** `tor3-sqa-virtual_maas` — MAAS logs **are** available (virtual_maas) and provide
+the Pacemaker/HAProxy evidence critical for diagnosis.
+
+**Observed in:**
+- Run 28478377482 (UUID: ca637be6-d60f-4fc5-9ed5-7d12676cc2bd, tor3-sqa-virtual_maas cluster_6; infra1 was the Pacemaker primary shut down; HAProxy restarted 5+ times 01:17:58–01:22:57)
 
 ---
 

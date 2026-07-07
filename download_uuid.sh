@@ -11,12 +11,12 @@ fi
 mkdir -p "files/${UUID}"
 
 echo "Fetching index: ${BASE_URL}/${UUID}/index.html"
-curl -fsSL "${BASE_URL}/${UUID}/index.html" -o "files/${UUID}/index.html"
+curl -g -fsSL "${BASE_URL}/${UUID}/index.html" -o "files/${UUID}/index.html"
 
 grep -oP '(?<=href=")[^"]+' "files/${UUID}/index.html" | while read -r file; do
     echo "Downloading: ${file}"
     mkdir -p "files/${UUID}/$(dirname "${file}")"
-    curl -fsSL "${BASE_URL}/${UUID}/${file}" -o "files/${UUID}/${file}"
+    curl -g -fsSL "${BASE_URL}/${UUID}/${file}" -o "files/${UUID}/${file}"
 done
 
 echo "Done. Files saved to files/${UUID}/"

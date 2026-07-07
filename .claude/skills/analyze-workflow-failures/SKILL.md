@@ -51,7 +51,8 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── kubernetes_aws.md                              ← per-step logs, patterns, grep hints
 │   ├── kubeflow_terraform.md                          ← per-step logs, patterns, grep hints
 │   ├── sunbeam_enable_plugins_all.md                  ← per-step logs, patterns, grep hints
-│   └── sunbeam_test_plugins.md                        ← per-step logs, patterns, grep hints
+│   ├── sunbeam_test_plugins.md                        ← per-step logs, patterns, grep hints
+│   └── test_juju4.md                                  ← per-step logs, patterns, grep hints
 └── patterns/
     └── maas-snap-apparmor-dbupgrade.md  ← deep-dive on specific recurring bug
 ```

@@ -2285,4 +2285,157 @@ tar -xJOf generated/sunbeam/sosreport-<joining-node>-*.tar.xz "*/var/log/juju/un
 **Observed in:**
 - Run `27283706450` (UUID: `f6374793-e6be-452c-bbd5-d1c66854b668`, `tor3-sqa-testflinger-cluster_3`, machine `octopot.maas` / `napple.maas`, openstack snap `2024.1/beta`, 2026-06-10).
 
+---
 
+### Pattern 15: `sunbeam cluster join` true failure — `openstack-hypervisor` never receives TLS certificates via cross-model relation (CMR delivery delay)
+
+**Applies to:** `sunbeam_deploy` step, `sunbeam cluster join` phase, multi-node parallel join on `tor3-sqa-shared_maas`
+
+**Symptom (in GitHub Actions log):**
+```
+subprocess.CalledProcessError: Command
+  ['ssh', ..., 'solqa-shared-maas-server-11.maas', '--', 'sunbeam', 'cluster', 'join',
+   '<token>', '--role', 'control', '--role', 'compute', '--accept-defaults']
+returned non-zero exit status 1.
+```
+
+**In `generated/sunbeam/output.log` (STDERR of failing joins):**
+```
+Timed out waiting for hypervisor application:
+TimeoutError("wait timed out after 1799.9999990530005s
+Status(
+  apps={
+    'openstack-hypervisor': AppStatus(
+      app_status=StatusInfo(current='waiting',
+        message='(certificates) integration incomplete', since='06:37:45Z'),
+      units={
+        'openstack-hypervisor/1': UnitStatus(
+          workload_status=StatusInfo(current='waiting',
+            message='(certificates) integration incomplete', since='06:37:45Z'),
+          ...),
+        'openstack-hypervisor/2': UnitStatus(
+          workload_status=StatusInfo(current='waiting',
+            message='(certificates) integration incomplete', since='06:37:45Z'),
+          ...),
+      },
+    ),
+  }
+)")
+```
+
+**Root cause:** The `openstack-hypervisor` charm waits for TLS certificates from `certificate-authority` (in the `openstack` k8s model) via a cross-model relation (CMR). For each new `openstack-hypervisor` unit, a `certificates-relation-created` hook must fire to submit a CSR to the CA. In this failure, two nodes joined concurrently in the first parallel batch, and their `certificates-relation-created` hook was never delivered during the 30-minute wait window. Without a CSR, the CA never issued certificates, and the units remained in `waiting: (certificates) integration incomplete` until the wait timed out.
+
+**Key signals:**
+- Exit code **1** (not 255) — this is the remote `sunbeam cluster join` process timing out, not SSH disconnect
+- `wait timed out after 1799.999...s` — the 1800-second internal wait
+- Blocking condition is `(certificates) integration incomplete` on `openstack-hypervisor` units (NOT `cinder-volume`, NOT `k8s`)
+- `juju_debug_log_openstack-machines.txt` shows the failing units ran `amqp-relation-created`, `nova-service-relation-created` etc. (internal relations) but has **no `certificates-relation-created` entry** for those units at any point in the log
+- `juju_debug_log_openstack.txt` shows the `certificate-authority` issued **no certificates** for the failing units' cross-model relation during the window — only one cert was issued via the CMR (for a unit that joined later)
+- **Distinct from false-negative patterns 9/10/13:** Unlike those, the `certificates incomplete` state persists in the final `juju_status_openstack-machines.txt` (collected ~15–45 min after failure), and `sunbeam_cluster_list.txt` shows compute roles as `waiting` (not `active`) for the failing nodes
+
+**How to distinguish from false negatives (patterns 9/10/13):**
+- Check `generated/sunbeam/sunbeam_cluster_list.txt`: if compute role shows `waiting` (not `active`), this is a true failure
+- Check `generated/sunbeam/juju_status_openstack-machines.txt`: if `openstack-hypervisor` units are still `waiting: (certificates)` after failure, the model did not converge
+- Check `juju_debug_log_openstack-machines.txt`: if `certificates-relation-created` hook is absent for the failing units, the CMR event was never delivered
+
+**Timeline signature:**
+```
+05:17:18  sunbeam_deploy started
+05:53:05  Bootstrap completed; server-11, 12, 13 join dispatched concurrently
+06:11:57  openstack-hypervisor/1 (server-13) and /2 (server-11) start deploying
+06:12:57  Install hooks complete; amqp/nova-service/identity/ceph relation-created hooks run
+06:14:24  Last hook entry for units 1 and 2 in machines debug log
+           ... 36-minute silence — no certificates-relation-created, no CSRs ...
+06:18:40  server-12 joins successfully (control, storage) ✅
+06:24:41  server-14 joins successfully (control) ✅
+06:29:04  server-15 (unit 3) submits CSR; CA issues cert at 06:31:11 ✅
+06:50:14  server-13 fails — 1800s wait expired (units 1/2 still waiting certificates)
+06:50:49  server-11 fails — same
+07:01:36  server-15 joins (compute) ✅; 07:03:01 server-20 (storage) ✅
+07:03:01  deploy_sunbeam.py raises CalledProcessError for server-11
+07:18Z    Log collection: openstack-hypervisor units 1, 2, 3 still waiting certificates
+```
+
+**Snap/openstack versions:**
+- `openstack` snap: `2024.1/beta`, openstack-hypervisor rev 431
+- Juju: 3.6.25
+
+**Observed in:**
+- Run 28564539076 (UUID: 61c6912e-622e-4373-ae5f-a45e97824bd4, tor3-sqa-shared_maas dh1_j8_2,
+  7 physical nodes, server-10 bootstrap, server-11 (control+compute) and server-13 (compute+storage)
+  failing, main branch, 2026-07-02)
+
+
+
+---
+
+### Pattern 27: `sunbeam cluster join` fails with `SnapNotFoundError` because snapd `find` returns HTTP 500 (KNOWN BUG lp:solutions-qa-ci:1850809)
+
+> **⚠️ This is a KNOWN BUG: `lp:solutions-qa-ci:1850809`.** When you match this pattern,
+> explicitly tell the user it is a known bug tracked as **`lp:solutions-qa-ci:1850809`** and
+> that a re-run is the appropriate action — it is a transient snap-store/snapd flake, not a
+> pipeline config or code defect.
+
+**Symptom (in GitHub Actions log / `generated/sunbeam/output.log`):**
+```
+subprocess.CalledProcessError: Command ['ssh', ..., '<node>.maas', '--', 'sunbeam',
+  'cluster', 'join', '<token>', '--role', 'control', '--accept-defaults']
+returned non-zero exit status 1.
+```
+The remote `sunbeam cluster join` reports:
+```
+Error: task error: Task NN: status 'failed', return code 1, details:
+Uncaught SnapNotFoundError in charm code: Snap 'openstack-network-agents' not found!
+```
+(The snap name may vary — e.g. `openstack-network-agents`, `cinder-volume`, etc.)
+
+**In `generated/sunbeam/juju_debug_log_openstack-machines.txt`:** the `SnapNotFoundError` is
+directly caused by an HTTP 500 from the local snapd `find` API:
+```
+File ".../operator_libs_linux/v2/snap.py", line 957, in _request_raw
+    response = self.opener.open(request, timeout=self.timeout)
+urllib.error.HTTPError: HTTP Error 500: Internal Server Error
+  ... (wrapped as SnapAPIError, then) ...
+File ".../ops_sunbeam/charm.py", line 1315, in ensure_snap_present
+    snap_svc = self.get_snap()
+File ".../operator_libs_linux/v2/snap.py", line 1036, in __getitem__
+    raise SnapNotFoundError(f"Snap '{snap_name}' not found!") from e
+charms.operator_libs_linux.v2.snap.SnapNotFoundError: Snap '<snap>' not found!
+```
+
+**Root cause:** During a node's `sunbeam cluster join`, Sunbeam drives the charm's
+install/settings flow, which calls `ensure_snap_present()` → `get_snap()`. That queries the
+local snapd REST API (`GET /v2/find?name=<snap>`) via `charms.operator_libs_linux.v2.snap`.
+snapd returns **HTTP 500 Internal Server Error** (a transient snapd/snap-store fault). The
+snap library catches any lookup failure in `__getitem__` and re-raises it as
+`SnapNotFoundError("Snap '<snap>' not found!")` — a misleading message: the snap exists, but
+the store lookup itself errored. The uncaught exception fails the charm hook → the join's
+Task NN fails → the remote `sunbeam cluster join` exits 1 → `deploy_sunbeam.py` raises
+`CalledProcessError` and the step fails.
+
+**Key signals:**
+- Exit code **1** (not 255) — the remote join process failed, not an SSH disconnect
+- `Uncaught SnapNotFoundError in charm code: Snap '<snap>' not found!` in the join STDERR
+- In `juju_debug_log_openstack-machines.txt`, the `SnapNotFoundError` is preceded by
+  `urllib.error.HTTPError: HTTP Error 500: Internal Server Error` from `snap.py` `_request_raw`
+- Multiple HTTP 500s may appear, affecting different snaps (e.g. `openstack-network-agents`
+  and `cinder-volume`) in the same window
+- **Transient/self-healing:** the affected units are typically `active/idle` in the final
+  `juju_status_openstack-machines.txt` — they recovered on hook retry, but the join command
+  had already aborted, so the step stays failed
+
+**Timeline signature:**
+```
+HH:MM   node NN join dispatched (--role control)
++~8min  unit <snap>/N throws HTTP 500 -> SnapNotFoundError; join Task NN fails
++       remaining nodes join successfully; failing node's units later reach active/idle
+```
+
+**Recommendation to report:** Known bug **`lp:solutions-qa-ci:1850809`** — transient snap
+store / snapd `find` HTTP 500. Re-run the pipeline. (Longer term: retry/backoff around the
+snap-store lookup and better error fidelity so an HTTP 500 isn't reported as "not found".)
+
+**Observed in:**
+- Run 28645713137 (UUID: fb0fce17-e59e-4f1a-8dce-5085508b7138, tor3-sqa-shared_maas dh1_j8_1,
+  7 physical nodes, server-01 bootstrap, server-05 (control) failing on
+  `openstack-network-agents` snap, main branch, 2026-07-03)

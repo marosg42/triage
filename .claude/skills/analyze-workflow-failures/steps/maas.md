@@ -1006,6 +1006,38 @@ grep "segfault" <work_dir>/maas-logs/<ip>/var/log/syslog
 
 **From run:** 26719477705 (UUID 5eb8d383-dd43-47da-9175-481d8e62aa89, tor3-sqa-dedicated_maas dh1_j2, Ubuntu 24.04 noble, linux 6.8.0-124-generic, node `anahuac` / HP ProLiant DL320e Gen8).
 
+**Variant — NVMe read path corrupts `dpkg-deb` during `maas:preflight` etckeeper install (apt exit 100):**
+Same IOMMU root cause, but the corrupted DMA read hits an **NVMe** transfer into a memory-mapped
+`.deb` rather than a bcache writeback. The maas layer fails very early in `maas:preflight`
+(`_preflight_config` → `exec_ensure_etckeeper` → `install_packages(["etckeeper"])`):
+
+```
+dpkg: error processing archive /var/cache/apt/archives/etckeeper_1.18.20-2_all.deb (--unpack):
+ dpkg-deb --control subprocess was killed by signal (Segmentation fault), core dumped
+E: Sub-process /usr/bin/dpkg returned an error code (1)
+subprocess.CalledProcessError: Command '[... apt-get -q install -y etckeeper]' returned non-zero exit status 100.
+```
+
+Node syslog shows the DMAR collision immediately preceding the segfault, with an NVMe/pagecache
+call trace and `Comm: dpkg-deb`:
+
+```
+DMAR: ERROR: DMA PTE for vPFN 0x791e0 already set (to 791e0003 not 13449a003)
+WARNING: CPU: 15 PID: 4148 at drivers/iommu/intel/iommu.c:2227 __domain_mapping+0x2b5/0x320
+CPU: 15 PID: 4148 Comm: dpkg-deb ... 6.8.0-134-generic
+Call Trace: intel_iommu_map_pages -> iommu_dma_map_sg -> dma_map_sgtable ->
+            nvme_map_data [nvme] -> ... -> read_pages -> filemap_fault
+dpkg-deb[4148]: segfault at 64b91c424c90 ip ... error 7 in dpkg-deb[...]
+```
+
+Distinguish from Pattern 15 (generic hardware fault): here there is a **specific DMAR
+`__domain_mapping` WARNING + segfault correlated in time**, and sibling nodes install the same
+package fine. Same remediation: `intel_iommu=off`/`pt` or drain the node.
+
+**From run:** 28504418626 (UUID 094389e6-446a-4f1d-bae4-d860cb0c285f, tor3-sqa-dedicated_maas
+dh1_j6, node `swoobat` / HP ProLiant DL360 Gen9, BIOS P89 2017, linux 6.8.0-134-generic, MAAS
+3.6-next, branch main, 2026-07-01).
+
 ### Pattern 15: Infra node hardware failure / disk corruption → `apt-get` exit code 100 → `rsync` fails (Logs wiped by retries)
 
 **Symptom (GitHub Actions log):**
@@ -1303,3 +1335,135 @@ startup sequencing may briefly take the VIP offline).
 **From run:** 28106239752 (UUID 57e8c8cb-b8f5-4a7b-ad9b-f01ab37d9002,
 tor3-sqa-virtual_maas cluster_7, MAAS snap rev 42148 / 3.8.0~alpha1 / Python 3.14,
 branch main, 2026-06-24).
+
+---
+
+### Pattern 21: `install_kvm=True` deploy on dedicated_maas — one KVM host node completes curtin but never finishes the 2nd (libvirt) phase → stuck in Deploying (KVM-host console not in bundle)
+
+**Symptom (FCE log.txt):** silent 30-minute timeout with **exactly one** KVM host node stuck.
+The poll state is asymmetric — one node reaches `Deployed`, the other never does:
+
+```
+foundationcloudengine.layers.configuremaas WARNING node5…: Deploying
+foundationcloudengine.layers.configuremaas WARNING node6…: Deployed
+...
+Exception: Not all KVM hosts were deployed in time.   # configuremaas.py:1687
+```
+
+This is the **same failure class as Patterns 8 and 9** (`install_kvm` two-signal deploy: curtin →
+1st `netboot-finished` → reboot → cloud-init installs libvirt → 2nd `netboot-finished` →
+`Deployed`), but observed on **`tor3-sqa-dedicated_maas` (cluster dh1-j6)** where `node5`/`node6`
+are VMs on a dedicated KVM host (e.g. `10.241.144.1`). The failing node reliably reaches
+`ALLOCATED → DEPLOYING`, emits the 1st `netboot-finished`, but **never emits the 2nd**, so MAAS
+holds it in `Deploying` until FCE's 30-minute timeout. The other node completes normally — proving
+the MAAS region/rack infra (infra1/2/3) and the deploy workflow are healthy.
+
+**Distinguishing evidence:**
+
+```bash
+# 1. Only ONE node transitions to DEPLOYED
+grep -rhoP "(node5|node6): Status transition from \w+ to \w+" <work_dir>/maas-logs/*/var/log/syslog | sort | uniq -c
+# Expect: "node6: ... DEPLOYING to DEPLOYED" present; NO equivalent line for the failing node
+
+# 2. Failing node's deploy workflow got exactly ONE netboot-finished; the healthy node got TWO
+grep -rhoP "netboot-finished \(workflow: deploy, id: deploy:\w+" <work_dir>/maas-logs/*/var/log/syslog | sort | uniq -c
+# Map deploy id -> node via the metadata status URL (e.g. POST /MAAS/metadata/status/<id>)
+
+# 3. Trace the failing node's primary MAC after curtin reboot (from cloud-init ci-info enp1s0)
+grep -rh "<node5_mac>" <work_dir>/maas-logs/*/var/log/syslog | grep -iP "dhcp|ipxe.cfg"
+# iPXE local-boot config served (GET /ipxe.cfg-<mac> -> 200 299) marks the reboot handoff
+```
+
+**Two observed sub-modes** (both terminate identically — stuck `Deploying`):
+
+- **Sub-mode A — booted, stalled mid-install** (run 28488689380 / UUID
+  `02cdc700-2aea-42c3-a0c9-7c52b8027a1a`, node5=`6srbfd`): after the curtin reboot the installed OS
+  **booted**, cloud-init ran and POSTed status, fetched vendor-data (200, 1101 bytes), and began
+  downloading the KVM/libvirt package set (`cpu-checker`, `msr-tools`, `dnsmasq-base`, `ipxe-qemu`,
+  …). It then went **completely silent** at its last status POST — no 2nd `netboot-finished`.
+  Resembles Pattern 8 but *with* partial package installation before the stall.
+
+- **Sub-mode B — never booted** (run 28378072920 / UUID
+  `efe51800-e101-4fe7-9d38-07d3615eed81`, node5=`6mdr8s`): curtin completed
+  (`finish: cmd-install: SUCCESS`, "System is rebooting"), DHCP + iPXE local-boot config served
+  (`GET /ipxe.cfg-<mac> -> 200 299`), then **total silence** — no cloud-init, no vendor-data fetch,
+  zero `.deb` downloads. The installed OS never booted. This is Pattern 9's signature.
+
+**Root cause:** Not determinable from the collected logs. The failing node is a VM on the dedicated
+KVM host (`10.241.144.1`), which is **not included in the FCE log bundle**, and once the installed
+OS boots its console is no longer streamed to MAAS rsyslog (only cloud-init HTTP POSTs are visible).
+The precise failure mode (boot/GRUB, kernel/VM crash, or a hang during apt/dpkg) is therefore
+unobservable. The healthy node completing the identical flow in the same run rules out MAAS infra,
+mirror, and workflow defects.
+
+**AppArmor note:** `snap.maas.pebble` → virsh → pkttyagent `DENIED` entries appear in bulk on these
+runs but are **benign** — they also appear during the successful node's deploy. Not the cause.
+
+**Recommendation:**
+1. Capture the failing node's **VM serial/console log from the KVM host (10.241.144.1)** in the log
+   bundle for `install_kvm` deploys — without it these second-boot failures are undiagnosable.
+2. Enrich FCE `_wait_for_deployed` timeout output with per-node last-contact timestamp and last
+   deploy signal received, instead of the bare "Not all KVM hosts were deployed in time." message.
+3. Consider a targeted redeploy of the single stuck KVM host before failing the whole layer.
+
+**From runs:** 28488689380 (UUID `02cdc700-2aea-42c3-a0c9-7c52b8027a1a`, sub-mode A) and
+28378072920 (UUID `efe51800-e101-4fe7-9d38-07d3615eed81`, sub-mode B), both
+tor3-sqa-dedicated_maas cluster dh1-j6, node5 stuck / node6 Deployed, branch main, 2026-06/07.
+
+---
+
+### Pattern 22: `maas-region-api` postinst crashes — `import netifaces` → `SystemError: ifaddresses() method: bad call flags` → apt exit 100
+
+**Symptom (FCE log.txt / run.log):** the `maas` layer aborts during region package install with
+a generic apt failure:
+
+```
+subprocess.CalledProcessError: Command '['ssh', ... 'ubuntu@<region_ip>', '--', 'sudo',
+"bash --login -c 'DEBIAN_FRONTEND=noninteractive apt-get -q install -y avahi-utils maas-region-api maas-dns'"]'
+returned non-zero exit status 100.
+```
+
+Raised from `maaslayer._install_api_host` → `remotehelpers.install_packages` → `rrr` → `run_cmd`.
+The real cause is buried in the apt output on the region host — the `maas-region-api` **postinst
+runs `/usr/sbin/maas-region`, which fails to import `netifaces`**:
+
+```
+Setting up maas-region-api (1:3.6.5-...-0ubuntu1~24.04.1) ...
+Traceback (most recent call last):
+  File "/usr/sbin/maas-region", line 33, in <module> ...
+  File "/usr/lib/python3/dist-packages/provisioningserver/utils/network.py", line 29
+    import netifaces
+SystemError: ifaddresses() method: bad call flags
+dpkg: error processing package maas-region-api (--configure):
+ installed maas-region-api package post-installation script subprocess returned error exit status 1
+dpkg: dependency problems prevent configuration of maas-dns:
+  maas-dns depends on maas-region-api (>= 2.4.0~beta1~); however: Package maas-region-api is not configured yet.
+E: Sub-process /usr/bin/dpkg returned an error code (1)
+```
+
+**Root cause:** The compiled `netifaces` C extension on the region host is ABI-incompatible with the
+host's CPython (observed: Ubuntu 24.04 / Python 3.12). Its `ifaddresses()` method is registered with
+invalid `METH_*` call flags, so the interpreter rejects it at import time. Every code path that loads
+`provisioningserver.utils.network` (all `maas-region` invocations) crashes, so the postinst can never
+succeed → dpkg leaves `maas-region-api` unconfigured → `maas-dns` dependency unmet → apt exits 100.
+**Deterministic** — retries will not help. This is an environment/packaging defect on the region-node
+base image, not a pipeline or FCE logic bug.
+
+**Distinguishing evidence:**
+
+```bash
+# The netifaces error appears in all three artifact logs:
+grep -rl "bad call flags\|import netifaces" files/<UUID>/generated/{foundation.log,maas/log.txt,github-runner/run.log}
+# Confirm it is the region-api postinst (not some later step):
+grep -n "Setting up maas-region-api\|dpkg: error processing package maas-region-api" files/run_<run_id>_failed.log
+```
+
+**Recommendation:**
+1. Fix `netifaces` on the dedicated_maas region-node image: reinstall/repin `python3-netifaces`
+   (or the pip build) to a version whose C extension matches the host Python 3.12 ABI.
+2. Add an image-build smoke test: `python3 -c "import netifaces; netifaces.ifaddresses('lo')"`.
+3. In FCE `install_packages` / `_install_api_host`, surface the remote apt/dpkg stderr in the raised
+   exception so the postinst traceback is visible without pulling full runner logs.
+
+**From run:** 28483359529 (UUID `2a86bfbd-c469-4198-b3db-db74aa6d8692`, tor3-sqa-dedicated_maas
+dh1_j2, region host 10.241.128.2, MAAS 3.6.5, Ubuntu 24.04 / Python 3.12, branch main, 2026-07-01).

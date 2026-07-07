@@ -132,7 +132,39 @@ RabbitMQ consumer lag around the failure window if recurrent.
 
 ---
 
-_Add more patterns below as they are discovered._
+### Pattern 3: Controller unit stuck in pending/allocating during HA scale-up
+
+**Symptom:**
+```
+Exception: Timed out waiting for juju ha to become ready.
+```
+
+The `enable_ha` sub-step completes successfully (add-unit commands return), but the
+`wait_for_ready` sub-step times out (~20 minutes) because one of the newly added
+controller units never reaches `active/idle`. The affected machine shows:
+- `juju-status`: `pending` (never transitions to `started`)
+- `unit-status`: `allocating` (never transitions to `idle`)
+- `machine-status`: `running` / `ACTIVE` (VM exists in OpenStack)
+- **No `hostname`, `dns-name`, `ip-addresses`, or `network-interfaces`** — the agent
+  never reported any networking metadata back to the controller
+
+**Root cause:** The OpenStack VM boots and becomes ACTIVE, but the jujud agent inside
+the VM never starts, fails to initialize, or cannot reach the controller API. This is
+a transient infrastructure issue — not a config or code bug.
+
+**Evidence to look for:**
+- `log.txt`: `Exception: Timed out waiting for juju ha to become ready.`
+- All juju status polls during the wait window show one machine with no network data
+- The affected machine has an `instance-id` and `machine-status: ACTIVE` but zero networking fields
+- Other machines are fully operational with complete network metadata
+- Total `wait_for_ready` duration: ~20 minutes before timeout
+
+**This is transient** — caused by OpenStack VM agent initialization failure. Retrying
+usually succeeds.
+
+**From:** run 28384011894, UUID 66579e9a-c8de-406a-b567-fac874c9ccef, tor3-sqa-sunbeam cluster_2, 2026-06-29.
+
+---
 
 ## Notes
 
