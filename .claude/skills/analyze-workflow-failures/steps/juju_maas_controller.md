@@ -540,6 +540,63 @@ the Pacemaker/HAProxy evidence critical for diagnosis.
 
 ---
 
+### Pattern 8: Machine-configuration/agent phase hangs → 30-min bootstrap-timeout ("cancelled")
+
+**Symptom (in `generated/juju_maas_controller/log.txt`):**
+```
+2026-07-07-15:41:29 root DEBUG Connected to 10.241.128.82
+2026-07-07-15:41:29 root DEBUG Running machine configuration script...
+2026-07-07-16:04:29 root DEBUG Bootstrap cancelled, you may need to manually remove the bootstrap instance
+2026-07-07-16:04:29 root DEBUG ERROR failed to bootstrap model: cancelled
+```
+followed by `ERROR controller foundations-maas not found`.
+
+**Root cause:** The machine was allocated, the OS deployed, SSH connected, and Juju began the
+synchronous *machine configuration script* phase (fetch `jujud` tools → install machine agent →
+start it). That phase then **stalled with no output** and the 30-minute `bootstrap-timeout=1800`
+expired, so Juju cancelled the bootstrap ("cancelled", not "connection refused") and destroyed
+the instance.
+
+**Distinguishing characteristics (vs. Pattern 1):**
+- SSH connects and "Running machine configuration script..." appears.
+- **Never** reaches "Bootstrap agent now started" or "Contacting Juju controller..." — the hang
+  is *before* the API-reachability phase (Pattern 1 fails *after*, on port 17070 refused).
+- Final error is `failed to bootstrap model: cancelled` (bootstrap-timeout), not a port error.
+- ~23-min gap of total silence between the config-script line and the cancel line; total
+  bootstrap wall time ≈ 30 min (1800s) + SSH overhead.
+
+**Evidence to look for (dedicated_maas / virtual_maas — MAAS logs available):**
+- VM serial console (`var/log/libvirt/qemu/<vm>-serial0.log`): base + Juju cloud-init
+  **finish cleanly** ("Cloud-init ... finished ... Up NNs", juju-bootstrap host keys generated),
+  then the console goes **silent** — no `jujud` output, no panic, no reboot.
+- Host `var/log/libvirt/qemu/<vm>.log`: QEMU killed by a clean teardown SIGTERM
+  (`terminating on signal 15 ... shutting down, reason=destroyed`) at the cancel time —
+  confirms the VM stayed alive (not a crash) and was torn down by the timeout.
+- Region syslog: no further MAAS metadata contact from the controller IP after cloud-init
+  finished, and `Reloaded DNS configuration; ip <controller-ip> released` at teardown time.
+- The in-guest `machine-0`/`jujud` logs do **not** survive (instance destroyed on cancel), so
+  the exact stall (tools fetch vs. agent start vs. transient SSH/network loss) usually cannot be
+  pinned down — recommend `--debug` bootstrap / keeping the failed instance next time.
+
+**Timing pattern (fa55838d — tor3-sqa-dedicated_maas dh1-j2, controller VM juju-1 / 4f6cr3):**
+```
+15:32:47  juju bootstrap starts (bootstrap-timeout=1800)
+15:33:07  machine 4f6cr3 (juju-1 VM, 16G/8c) allocated; agent 3.6.25 located
+15:41:08  Waiting for address
+15:41:27  controller VM cloud-init finishes cleanly (juju-bootstrap keys, /var/lib/juju ready)
+15:41:29  SSH connected → "Running machine configuration script..."   ← stalls here
+16:04:29  bootstrap-timeout expires → "Bootstrap cancelled" / "failed to bootstrap model: cancelled"
+16:04:35  QEMU juju-1 killed by teardown (SIGTERM); 16:04:43 IP 10.241.128.82 released
+```
+
+**Substrate:** `tor3-sqa-dedicated_maas` (dh1-j2) — MAAS logs available; controller runs as a
+KVM VM (`juju-1`) on the MAAS host, so use the libvirt/qemu serial console for the guest view.
+
+**Observed in:**
+- Run 28870133563 (UUID: fa55838d-32df-4ea0-9d1b-abfa23160f3e, tor3-sqa-dedicated_maas dh1-j2, controller VM juju-1 / system_id 4f6cr3 / 10.241.128.82)
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes

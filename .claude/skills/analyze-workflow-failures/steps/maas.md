@@ -1467,3 +1467,188 @@ grep -n "Setting up maas-region-api\|dpkg: error processing package maas-region-
 
 **From run:** 28483359529 (UUID `2a86bfbd-c469-4198-b3db-db74aa6d8692`, tor3-sqa-dedicated_maas
 dh1_j2, region host 10.241.128.2, MAAS 3.6.5, Ubuntu 24.04 / Python 3.12, branch main, 2026-07-01).
+
+---
+
+### Pattern 23: Target node HP Smart Array (hpsa) RAID controller lockup → bcache I/O errors → curtin fails repeatedly → node stuck in `Deploying` → "Not all KVM hosts were deployed in time"
+
+**Symptom (GitHub Actions log / `generated/maas/log.txt`):**
+```
+foundationcloudengine.layers.configuremaas WARNING <good-node>…: Deployed
+foundationcloudengine.layers.configuremaas WARNING <bad-node>…: Deploying
+…
+  File ".../configuremaas.py", line 1687, in _wait_for_deployed
+    raise Exception("Not all KVM hosts were deployed in time.")
+Exception: Not all KVM hosts were deployed in time.
+```
+One KVM host deploys fine; the other is stuck in `Deploying` for the full ~30-minute poll window.
+
+**Root cause:** A hardware storage failure on the stuck physical node. Its HP Smart Array RAID
+controller (`hpsa`) locks up during curtin's OS install onto a bcache device (RAID logical
+volume backing + NVMe cache). The controller lockup makes the backing disk unusable, bcache
+stops the device, the EXT4 journal aborts, and every curtin attempt dies with `[Errno 5]
+Input/output error`. MAAS silently retries curtin (fresh attempts every ~6 min) but the node
+never reaches `DEPLOYED`, so FCE's 30-minute `_wait_for_deployed` times out. This is a genuine
+node hardware fault, not a MAAS/FCE/software bug.
+
+**Evidence to look for** (in the extracted MAAS log archive, on the live region node's syslog,
+filtered to `[<bad-node>] kernel:`):
+- `hpsa 0000:03:00.0: Controller lockup detected: 0x00130001 after 30`
+- `hpsa … scsi 0:1:0:0: reset logical failed … HP LOGICAL VOLUME RAID-0`
+- `bcache: bch_count_backing_io_errors() sdaN: IO error on backing device, unrecoverable` (dozens)
+- `bcache: bch_cached_dev_error() stop bcacheN: too many IO errors on backing device sdaN`
+- `EXT4-fs error (device bcacheN): … Detected aborted journal`; `I/O error, dev sda, sector … op WRITE`
+- curtin: `chroot: failed to run command 'apt-get': Input/output error`; `curtin: Installation failed`
+- MAAS: `<node>: Status transition from ALLOCATED to DEPLOYING` with **no** later `DEPLOYED`.
+- The recurring lockup timestamps line up with fresh curtin retries (e.g. 18:23, 18:30, 18:36).
+
+**How to distinguish from Pattern 1 (AppArmor virsh):** Check the AppArmor denial timestamps —
+if they are all outside the job window (stale from prior runs), the virsh pattern is ruled out.
+Here the failure is disk I/O on the *target node being installed*, not virsh on the region host.
+
+**Recommendation:**
+1. Repair/pull the faulty node — HP Smart Array controller locking up (check firmware, cache
+   battery, disks behind the RAID-0 logical volume).
+2. FCE could detect terminal curtin/deployment failures (MAAS `Failed deployment`, or repeated
+   `[Errno 5] Input/output error`) and fail fast with a "node storage/hardware failure" message
+   instead of waiting the full 30-minute timeout with a generic message.
+
+**From run:** 28810114519 (UUID `1ece2412-d7fa-4c22-9aae-e0b427b5959e`, tor3-sqa-dedicated_maas
+dh1-j6, failing node `beartic`/`hh6kps`, MAAS region `leafeon`, branch main, 2026-07-06).
+
+---
+
+### Pattern 24: `register_vmhost=True` (LXD) node — LXD resource discovery fails on missing `/sys/class/block/<dev>/removable` → "Failed to discover VM host" → node stuck in `Deploying` → "Not all KVM hosts were deployed in time"
+
+**Symptom (GitHub Actions log / `generated/maas/log.txt`):**
+```
+foundationcloudengine.layers.configuremaas WARNING node5…: Deployed
+foundationcloudengine.layers.configuremaas WARNING node6…: Deploying
+…
+Exception: Not all KVM hosts were deployed in time.
+```
+Two KVM hosts are deployed at the same time with **two different commands**:
+- `maas … machine deploy <id> install_kvm=True`   → **virsh/libvirt** VM host (e.g. node5) → **Deployed**
+- `maas … machine deploy <id> register_vmhost=True` → **LXD** VM host (e.g. node6) → **stuck Deploying**
+
+The virsh host always succeeds; only the LXD host hangs. This is common on **virtual_maas**
+(and can occur on dedicated_maas too). **Not** a hardware fault — curtin completes fine.
+
+**Root cause:** For a `register_vmhost` deployment, after the node's OS installs and reboots,
+MAAS finalises the deploy by connecting to the node's LXD API and *discovering* the VM host
+(`metadataserver/api_twisted.py:_create_vmhost_for_deployment` → `maasserver/vmhost.py:
+discover_and_sync_vmhost` → `provisioningserver/drivers/pod/lxd.py:discover` →
+`lxd_cpu_speed(client.resources)`). LXD's `GET /1.0/resources` (storage resources) fails to read
+a block-device sysfs attribute and returns `pylxd.exceptions.NotFound`. MAAS raises
+`PodProblem: Failed talking to pod`, aborts vm-host registration, and — critically — **does not
+retry and does not mark the node Failed**. The node sits in `DEPLOYING` until FCE's 30-minute
+`_wait_for_deployed` timeout fires. The node's disk uses **bcache** (backing partitions like
+`sda4`/`sda5`), and the offending device does not expose `/sys/class/block/sda4/removable` when
+LXD probes it (likely a udev/bcache settle race, or a MAAS/LXD snap regression).
+
+**Evidence to look for** (extract the MAAS archive; grep the region node syslogs — infra1/2/3
+for virtual_maas — filtered to the deploy window):
+- `provisioningserver.rpc.pods: [critical] Failed to discover VM host.`
+- `pylxd.exceptions.NotFound: Failed to retrieve storage information: Failed to read
+  "/sys/class/block/sda4/removable": ... no such file or directory`
+- `maasserver.exceptions.PodProblem: Failed talking to pod: ...` from `_create_vmhost_for_deployment`
+- LXD-host node: `curtin: Installation finished` + `netboot_off` + reboot (OS install **succeeded**).
+- MAAS: LXD node's last transition is `ALLOCATED → DEPLOYING`, **no** `DEPLOYED`, **no** `FAILED`,
+  and no further node activity after the single `Failed to discover VM host` event.
+- The virsh node (`install_kvm=True`) reaches `Deployed` normally (virsh pod driver doesn't call
+  LXD's resources endpoint). A benign `virsh pool 'maas' already exists` error may also appear.
+
+**How to distinguish from Pattern 23 (hardware):** Here the OS install **succeeds** (curtin
+finished, node rebooted) and the failure is a MAAS-side `PodProblem`/LXD `NotFound` during
+vm-host discovery — there are **no** `hpsa` controller lockups, no `bcache … unrecoverable IO
+error`, no curtin `[Errno 5] Input/output error`. Pattern 23 is a target-disk hardware failure;
+this is a MAAS+LXD software/race bug.
+
+**Recommendation:**
+1. **Suspected trigger — LXD 5.21.5 (stable ~2026-07-05):** its release-notes highlight
+   "Disk usage in resources" made the `resources` endpoint **bcache-aware** (new `used_by`
+   field / `resources_disk_used_by` extension). This is the same endpoint MAAS calls and the
+   same bcache subsystem that fails here on `/sys/class/block/sda4/removable`. If this issue
+   appeared only after ~July 5, **pin LXD to the pre-5.21.5 revision (5.21.4)** on the
+   `register_vmhost` node image to confirm/bisect, and file an upstream LXD bug (resources
+   enumeration should tolerate a missing `removable` sysfs attr on bcache backing partitions).
+2. LXD/MAAS: resource discovery should tolerate a missing `removable` sysfs attribute; MAAS
+   should retry VM-host discovery during `register_vmhost` deployment instead of aborting on the
+   first `NotFound`.
+3. Add a settle/retry before LXD resource discovery to avoid a udev/bcache race.
+4. FCE could detect region-side `Failed to discover VM host` / `PodProblem` and fail fast with a
+   clear "LXD VM-host registration failed" message rather than waiting the full 30-minute timeout.
+
+**From run:** 28846740816 (UUID `53e24e11-080d-4283-866a-116a9bf285a5`, tor3-sqa-virtual_maas,
+LXD host node6/`mq77rx`, virsh host node5/`krcqxr`, MAAS snap 42185, branch main, 2026-07-07).
+
+### Pattern 25: 3-node HA MAAS — 2 of 3 rack controllers stuck `degraded` due to unstable rack↔region RPC connectivity → `configure_maas`/`_sync_images` → `wait_for_rack_controllers_running` timeout
+
+**Symptom (GitHub Actions log):**
+```
+Traceback (most recent call last):
+  ...
+  File ".../foundationcloudengine/layers/configuremaas.py", line 323, in build
+    self._sync_images()
+  File ".../foundationcloudengine/layers/configuremaas.py", line 357, in _sync_images
+    wait_for_rack_controllers_running(self._maas_profile)
+  File ".../foundationcloudengine/maas_cli.py", line 1459, in wait_for_rack_controllers_running
+    raise Exception(
+Exception: Timed out waiting for racks to enter "running" state: {'7peq8p': 'running', 'sfgqab': 'degraded', 'n3m8tf': 'degraded'}
+```
+`wait_for_rack_controllers_running` (maas_cli.py:1459, called from configuremaas.py:357 `_sync_images`,
+itself from configuremaas.py:323 `build`) polls `rack-controllers read` ~every 30 s and requires
+**all** racks to report `running`. It polls for ~20 minutes and the **same status dict** repeats on
+every poll (two racks never leave `degraded`), then the timeout fires (exit 1). This is a
+**dedicated_maas / virtual_maas** HA deploy (3 infra nodes, each running both `regiond` and `rackd`,
+fronted by pacemaker/corosync + a region VIP).
+
+**Root cause:** On a freshly-deployed 3-node HA MAAS, two of the three rack controllers never
+stabilise their `rackd`↔`regiond` RPC connectivity. MAAS scores a rack `running` only when it holds
+stable, complete RPC connectivity to the region processes; while connections churn it reports
+`degraded`. The affected racks sit in a continuous connect → authenticate → register → **lose** loop
+for the whole poll window, so they stay `degraded` and FCE times out. **Local rack services are all
+healthy** — the `degraded` state is purely about incomplete/unstable region RPC connectivity, not a
+dead service.
+
+**Evidence to look for** (extract the MAAS archive; the failing step exposes the status dict directly,
+so first map the failing system_ids to nodes):
+- Map node IP → hostname → rack system_id. Each infra node's `maas-rackd` logs its own
+  registration; grep for the rack ids from the error dict:
+  ```bash
+  grep -rh "registered (via" files/maas-logs/*/var/log/syslog | grep -oP "Rack controller '[^']+'"
+  # Then per node: which region event-loops each rack registers with
+  grep -h "maas-rackd" files/maas-logs/<ip>/var/log/syslog | grep "registered (via" | grep -oE "via [a-z]+:" | sort | uniq -c
+  ```
+- Continuous RPC flap on the degraded racks (repeats dozens of times across the poll window):
+  `provisioningserver.rpc.clusterservice: ClusterClient connection established` /
+  `Rack controller '<id>' registered (via <host>:pid=N)` / `Worker pid:N lost burst connection`.
+- Dependent failures from the churn: `provisioningserver.rpc.dhcp: Can't initiate DHCP probe;
+  no RPC connection to region`.
+- Confirm services are healthy (rules out a dead-service cause): during the poll window
+  `maas.service_monitor` reports every managed service `on`/`running` on all nodes; no
+  `is dead` / `expected to be running` entries.
+- **Startup-only red herring — check the timestamps before blaming the VIP:** early boot logs
+  often show many `Region not available: … 113: No route to host (While requesting RPC info at
+  http://<region-VIP>:80/MAAS)`. These stop the instant pacemaker starts `res_maas_vip`
+  (`Result of start operation for res_maas_vip on <node>: ok`). If that resolves *before* the
+  `wait_for_rack_controllers_running` poll window begins, the VIP was reachable during the
+  failure and is **not** the sustained cause — the sustained cause is the ongoing RPC flap.
+
+**How to distinguish:** The GitHub error prints the exact `{system_id: status}` dict, so the failing
+step and racks are unambiguous. Unlike boot-resource/image patterns (11, 16, 18, 20) there is no
+Temporal/import error; unlike the deploy patterns (8, 9, 21, 23, 24) no node is stuck in `Deploying`.
+The signature is specifically **rack controllers stuck `degraded`** (not `dead`, not a service down)
+with continuous `lost burst connection` RPC churn on the degraded nodes.
+
+**Recommendation:**
+1. Investigate rack↔region RPC stability on the HA cluster (MTU, region/nginx worker churn,
+   instability of the RPC-info endpoint behind the VIP forcing constant re-resolve/reconnect).
+2. Improve `wait_for_rack_controllers_running` diagnostics — log *why* each rack is `degraded`
+   (per-service + per-region-connection detail), and allow retry/backoff so transient HA settling
+   on a fresh deploy doesn't fail the run outright.
+3. Ensure all region event-loops/VIP are fully converged before gating image sync on rack `running`.
+
+**From run:** 28909652458 (UUID `9a8aef33-a5cc-4e9b-b96d-1f1c17b70bbb`, tor3-sqa-dedicated_maas,
+cluster dh1-j2, MAAS 3.5.13, branch main, 2026-07-08). Degraded: `sfgqab` (sunset/10.241.128.3),
+`n3m8tf` (anahuac/10.241.128.2); running: `7peq8p` (noma/10.241.128.4); region VIP 10.241.128.5.

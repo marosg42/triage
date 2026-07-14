@@ -148,6 +148,54 @@ available on that cluster. Also consider fixing the FCE `collect_logs` bug for
 
 ---
 
+### Pattern 3: config-changed hook fails — MetalLB validating webhook unreachable (HTTP 500 on IPAddressPool)
+
+**Symptom (GitHub log):** identical outer failure to Pattern 2 — unit goes to
+`error`, `juju-wait` returns exit 1, FCE traceback ends in
+`jujuworkloadlayer.py wait_until_ready`.
+
+**Symptom (juju crashdump `debug_log.txt`):**
+```
+INFO unit.metallb/0.juju-log MetalLB native manifest has been installed
+INFO ... HTTP Request: PATCH https://<apiserver>/apis/metallb.io/v1beta1/namespaces/metallb-system/ipaddresspools/<model>-metallb?force=true... "HTTP/1.1 500 Internal Server Error"   (repeated for several minutes)
+ERROR unit.metallb/0.juju-log Uncaught exception while in charm code:
+  httpx.HTTPStatusError: Server error '500 Internal Server Error' for url '.../ipaddresspools/<model>-metallb...'
+  lightkube.core.exceptions.ApiError: Internal error occurred: failed calling webhook
+  "ipaddresspoolvalidationwebhook.metallb.io": failed to call webhook:
+  Post "https://webhook-service.metallb-system.svc:443/validate-metallb-io-v1beta1-ipaddresspool?timeout=10s":
+  dial tcp <clusterip>:443: connect: connection refused
+ERROR juju.worker.uniter.operation hook "config-changed" ... failed: exit status 1
+```
+
+**Root cause:** After installing the MetalLB native manifests, the charm's
+`config-changed` hook applies the `IPAddressPool` custom resource. This triggers
+MetalLB's own **validating admission webhook**, which the API server serves by
+calling `webhook-service.metallb-system.svc:443`. The webhook backend (the MetalLB
+controller pod) was not yet ready, so every API-server call to it was refused and
+surfaced to the charm as HTTP 500. The charm retries for several minutes; if the
+webhook never becomes reachable in that window, the hook raises an uncaught
+`ApiError` and the unit goes to `error`. This is a **startup-ordering race**, not
+an IP-range or config problem — the MicroK8s cluster itself is fully healthy
+(all `microk8s/*` units `active/idle`).
+
+**Evidence to look for:**
+- Crashdump `debug_log.txt`: repeated `PATCH .../ipaddresspools/... 500 Internal
+  Server Error`, then `failed calling webhook "ipaddresspoolvalidationwebhook.metallb.io"
+  ... connection refused`
+- Crashdump `pods.txt`: charm pod `metallb-0` shows `0/1 Running` (hook in error)
+- `juju_status_..._microk8s.txt`: all MicroK8s units `active/idle`, "node is ready"
+- Timeline: a multi-minute PATCH retry loop preceding the error confirms the race
+
+**Substrate observed:** `tor3-sqa-shared_maas`, dh1_j8_1 (2026-07-09, run 29007511122)
+
+**Recommended action:** Retry the run — the webhook race typically clears on the
+next attempt. Longer-term, the metallb charm should wait for `webhook-service`
+endpoints to be ready (or treat this specific 500 as a retryable `WaitingStatus`)
+before applying the `IPAddressPool`. On shared_maas, slow image pulls can delay the
+controller/webhook pod past the charm's retry budget.
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes
