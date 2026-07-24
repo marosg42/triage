@@ -471,6 +471,69 @@ remained `Deploying` at failure; no hardware errors.
 
 ---
 
+### Pattern 7: `juju add-model` fails — MongoDB drops connection (EOF) while creating the model `logs` collection index → **known bug `gh:juju-GH:22947`**
+
+**Symptom (FCE magpie/log.txt):**
+```
+root DEBUG [localhost]: juju add-model -c foundations-maas magpie maas_cloud
+root ERROR [localhost] Command failed: juju add-model -c foundations-maas magpie maas_cloud
+root ERROR 2[localhost] STDERR follows:
+ERROR failed to create new model: initialising model logs collection:
+      cannot create index for logs collection logs.<model-uuid>: EOF
+
+subprocess.CalledProcessError: Command '['juju', 'add-model', '-c', 'foundations-maas',
+  'magpie', 'maas_cloud']' returned non-zero exit status 1.
+```
+
+The failure occurs at the very start of the magpie step — during model *creation*, before any
+machine is deployed or any charm is deployed. The call originates from
+`magpielayer.py:508` → `juju_cli.add_model` (`juju_cli.py:479`).
+
+**Root cause:** When Juju creates a new model it initialises the per-model `logs` collection in
+the controller's internal MongoDB and builds an index on it. The mgo (Go MongoDB) driver's
+index-build request terminates with `EOF` — the MongoDB server closed the socket mid-operation
+instead of returning a result. `juju add-model` does **not** retry this operation and exits
+non-zero immediately, so FCE raises `CalledProcessError` and the step fails.
+
+This is a **known Juju bug: `gh:juju-GH:22947`** — Juju's model-creation path does not retry
+the `logs` collection index build when the controller MongoDB transiently drops the connection.
+
+**Timing signature:** `juju add-model` runs for ~63 seconds before the `EOF` error is returned.
+
+**Distinguishing from Patterns A / E (other MongoDB errors):**
+
+| | Pattern A | Pattern E | Pattern G |
+|---|---|---|---|
+| Failing command | `juju deploy` | `juju-wait` (permission check) | `juju add-model` |
+| Failure phase | After machines deployed | During wait/poll | Model creation (first thing) |
+| Error message | `cannot add application: not master and slaveOk=false` | `not master and slaveOk=false` in permission check | `initialising model logs collection: cannot create index ... EOF` |
+| Mechanism | Primary unavailable during write | Primary election during read | MongoDB drops connection during index build |
+| Tracked bug | — | — | **`gh:juju-GH:22947`** |
+
+**Evidence to look for:**
+- `generated/magpie/log.txt`: `failed to create new model: initialising model logs collection: cannot create index for logs collection logs.<uuid>: EOF`
+- No `magpie` model exists (`ERROR model foundations-maas:admin/magpie not found` immediately before the add-model attempt — expected, as the model is being created)
+- Controller `juju_status_foundations-maas_controller.txt` (collected post-failure) shows all 3 controller units `active/idle` — the controller recovered, confirming a transient MongoDB blip rather than a permanent fault
+
+**Retryable:** Yes. Transient controller MongoDB condition (mongod restart, memory pressure,
+primary re-election, or IO stall). Re-running the pipeline is expected to succeed. The
+underlying no-retry behaviour is tracked upstream as `gh:juju-GH:22947`.
+
+**Observed occurrences (all tor3-sqa-dedicated_maas cluster dh1_j2, Juju 3.6.25, branch main):**
+
+| Run ID | UUID | Date | Model-logs index |
+|---|---|---|---|
+| 29269320801 | 73b33368-321a-4c7d-a195-8434c9234dfa | 2026-07-13 19:43 | logs.26c9e0fe-…: EOF |
+| 29281162743 | 80426550-f99e-48cb-9da5-f164a9c583b3 | 2026-07-13 22:47 | logs.4984ccb3-…: EOF |
+| 29307671758 | 62b7327b-b735-4b5a-ac43-632b11c5e311 | 2026-07-14 07:41 | logs.4096d9f4-…: EOF |
+| 29316797989 | 5060ffea-7fc7-4a35-8575-812090e8f862 | 2026-07-14 10:29 | logs.1943e3a5-…: EOF |
+| 29728121857 | fa3e2471-561e-4a2b-bd8c-75d7e3fd0401 | 2026-07-20 11:13 | logs.f1700500-…: EOF |
+
+All five share the identical command, error signature, and ~63 s runtime before failure; the
+3-node HA controller was healthy at status-collection time in every case.
+
+---
+
 ## Notes
 
 - Deploys are issued sequentially per network space; any space can be the one that fails

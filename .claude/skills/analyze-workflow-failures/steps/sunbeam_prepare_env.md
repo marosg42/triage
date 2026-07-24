@@ -152,6 +152,41 @@ tar -xOf "$SOS" '*/sos_commands/snap/journalctl_--no-pager_--unit_snapd' \
 tar -xOf "$SOS" '*/sos_commands/snap/snap_changes_--abs-time' | grep 'Install "microceph"'
 ```
 
+### Pattern 4: node snapd binary corrupted — snapd crash-loops, socket refused
+
+**Symptom (in GitHub Actions / layer log):**
+```text
+error: cannot communicate with server: Post "http://localhost/v2/snaps/microceph": dial unix /run/snapd.socket: connect: connection refused
+subprocess.CalledProcessError: Command '['ssh', ..., '<node>.maas', '--', 'sudo', 'snap', 'install', 'microceph', '--channel', 'squid/candidate']' returned non-zero exit status 1.
+  File ".../products/sunbeam/clean_disks.py", line 28, in <module>
+```
+
+**Root cause:** `clean_disks.py` unconditionally runs `snap install microceph` on each
+node with a configured OSD device (to zap the disk via `microceph.ceph-bluestore-tool`).
+On the failing node, `snapd.service` is dead: its Go runtime aborted at startup with
+`fatal error: invalid runtime symbol table` / `runtime: invalid pc-encoded table
+f=crypto/rsa.encrypt`, i.e. the `/usr/lib/snapd/snapd` executable is **corrupted** on
+that host. snapd crash-loops until systemd hits its restart limit
+(`Start request repeated too quickly`), leaving `/run/snapd.socket` refusing connections.
+This is a node/hardware fault (disk or memory corruption of the snapd binary), not a
+pipeline bug. Distinct from Pattern 3 (store-side HTTP 408) — here snapd never runs.
+
+**Quick check:**
+```bash
+# Which node failed, and the socket-refused error
+grep -n "connection refused\|snapd.socket\|clean_disks" generated/sunbeam/output.log
+
+# Confirm snapd crash on that node's sosreport
+SOS=$(find generated/sunbeam -name 'sosreport-<node>-*.tar.xz' | head -1)
+mkdir -p /tmp/n && tar -xf "$SOS" -C /tmp/n
+cat /tmp/n/*/sos_commands/snap/systemctl_status_snapd      # Active: failed, restart counter 5
+grep "invalid runtime symbol table\|invalid pc-encoded table" \
+  /tmp/n/*/sos_commands/snap/journalctl_--no-pager_--unit_snapd
+```
+
+**Recommendation:** Recycle/reprovision the suspect node (fresh image clears the corrupt
+binary); optionally add a `snapd` health pre-check to `clean_disks.py` for clearer triage.
+
 ---
 
 _Add more patterns below as they are discovered._
