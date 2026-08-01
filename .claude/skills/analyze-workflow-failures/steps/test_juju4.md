@@ -121,6 +121,77 @@ failure, not a PostgreSQL charm or pipeline defect.
 
 ---
 
+### Pattern 3: `postgresql-test-app` fails `database-relation-changed` early, before the DB cluster forms (Juju 4.0/candidate)
+
+**Symptom:**
+```
+ERROR:root:postgresql-test-app/0 failed: workload status is error
+##[error]Process completed with exit code 1.
+```
+`juju status` at failure:
+```
+postgresql           active    3   (or 1/3)   postgresql           16/edge        1195
+postgresql-test-app  error     1              postgresql-test-app  latest/stable  513   hook failed: "database-relation-changed"
+postgresql-test-app/0*  error  ...  hook failed: "database-relation-changed"
+postgresql/0* active ; postgresql/1,2 waiting  "awaiting for cluster to start" (or allocating)
+```
+
+**Root cause:** In the initial deploy wait, the **`postgresql-test-app`** client unit (not a
+postgresql unit) fails its `database-relation-changed` hook while the 3-unit postgresql cluster
+is **still forming** — typically only the leader postgresql unit is `active` and the others are
+`waiting` ("awaiting for cluster to start") or `allocating`. The relation data the test-app
+consumes is partial/in-flux at that moment. The step's fail-fast `juju-wait` aborts on the
+first `error` workload status, so the whole step exits 1 even though Juju would normally retry
+the hook.
+
+**Distinguishing from Patterns 1 & 2:** the failing app is `postgresql-test-app`, not
+`postgresql`; the machines are usually all `started`/ACTIVE (not an allocating/pool problem),
+and the postgresql cluster is mid-formation. This is a relation-hook timing issue, not node
+provisioning.
+
+**Juju 4.0/candidate vs charm bug — how to tell:** these runs use `ADDON_ID: juju_4.0_candidate`
+(controller `Version 4.0.13`). The exact cause (a Juju 4.0/candidate relation-data behavior
+change vs a test-app charm that mishandles early/partial relation data) **cannot be determined
+from the Swift bundle** because no `juju-crashdump`/unit debug-log is collected on the
+openstack/sunbeam substrates. To attribute definitively you MUST capture
+`juju debug-log --replay --include postgresql-test-app/0` (or a crashdump) from the live run —
+the `juju status` dump alone only shows the hook name, not the traceback.
+
+**Observed:** runs 38c79430, a8caeed6, d59f2e4e (2026-07-22) — all identical: test-app rev 513,
+Juju 4.0.13, postgresql cluster still forming.
+
+**LIVE-CAPTURED root cause (run 30120756631, 2026-07-24, Juju 4.0.13):** the hook crashes on a
+**Juju secrets access denial**. The consumer's `data_platform_libs`
+`_on_relation_changed_event` → `_register_secrets_to_relation(diff.added)` reads a just-added
+relation secret URI (`database.<relid>.user.secret`) and Juju returns:
+```
+ops.model.ModelError: ERROR "postgresql-test-app/0" is not allowed to read this secret
+  secret-get ... secret://<model-uuid>/<secret-id> --label database.4.user.secret  (exit 1)
+```
+At failure the provider postgresql cluster is **degraded** (`postgresql/2* Primary (degraded)`,
+others still installing; Patroni "Unable to get primary. Cluster status unreachable"), and the
+denial starts the instant the secret URI appears in the databag (`diff.added`) and is read
+within seconds → a grant-propagation race. `data_platform_libs` does not tolerate the transient
+denial (raises instead of deferring), so the hook errors and the fail-fast wait aborts the step.
+
+**Juju-4 vs charm — how to close it:** the "not allowed to read this secret" verdict is Juju's,
+and only reproduces under `juju_4.0_candidate`. But a healthy grant was not proven — the
+provider cluster was unhealthy, so it may simply not have granted yet. To decide definitively,
+capture live `juju secrets --format yaml` + per-secret grants for the `database` relation at the
+moment of the consumer error (ideally with a healthy postgresql cluster): grant-present-but-
+denied ⇒ Juju 4.0.13 regression; no-grant-yet ⇒ provider-readiness race + consumer-lib
+intolerance. Full write-up: `outputs/30120756631-analysis.md`.
+
+**Capturing live (what worked):** SSH to the runner; the foundation-openstack controller/model
+`postgresql` is reachable with the juju client the step installs (4.0.x by test time — auto-pick
+from `/snap/juju/*/bin/juju`). When `juju status -m foundation-openstack:postgresql` shows
+`postgresql-test-app ... hook failed`, grab
+`juju debug-log -m foundation-openstack:postgresql --replay --include postgresql-test-app/0
+--no-tail -l DEBUG` (contains the traceback) plus `juju secrets`/grants and a crashdump — before
+the pipeline's cleanup destroys the model.
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes

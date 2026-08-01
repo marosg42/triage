@@ -22,6 +22,7 @@ This skill is split across files to keep context lean. Only load what you need:
 ├── SKILL.md                        ← you are here (core process)
 ├── steps/
 │   ├── _template.md                                    ← template for new step files
+│   ├── canonicalk8s_openstack.md                       ← per-step logs, patterns, grep hints
 │   ├── existing_juju_maas_controller_microk8s.md       ← per-step logs, patterns, grep hints
 │   ├── juju_k8s_controller.md                          ← per-step logs, patterns, grep hints
 │   ├── juju_kubernetes_controller.md                   ← per-step logs, patterns, grep hints
@@ -54,7 +55,8 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── sunbeam_test_plugins.md                        ← per-step logs, patterns, grep hints
 │   └── test_juju4.md                                  ← per-step logs, patterns, grep hints
 └── patterns/
-    └── maas-snap-apparmor-dbupgrade.md  ← deep-dive on specific recurring bug
+    ├── maas-snap-apparmor-dbupgrade.md  ← deep-dive on specific recurring bug
+    └── metallb-speaker-wedge.md         ← MetalLB L2 speaker hang → VIP i/o timeout
 ```
 
 After identifying the failed step (Step 2), load the matching step file:

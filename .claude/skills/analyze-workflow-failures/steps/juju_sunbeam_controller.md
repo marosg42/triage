@@ -59,6 +59,13 @@ grep -n "192.168.122.34\|DHCPv4 address\|Attempting to connect to 10\.243\." gen
 
 ### Pattern 1: Bootstrap VM cannot reach the Sunbeam public Keystone VIP
 
+> **⚠️ Before concluding "guest routing gap", check Pattern 3 (MetalLB speaker wedge).** The
+> guest→public-VIP path normally works (this step succeeds in most runs). An `i/o timeout` to
+> the public VIP during bootstrap is frequently caused by the MetalLB L2 speakers wedging and
+> ceasing to answer ARP for the VIP — a transient infra fault — **not** a permanent inability
+> of tenant instances to route to the public API. Always inspect the MetalLB pod-log timestamps
+> (Pattern 3) before attributing this to guest networking.
+
 **Symptom:**
 ```
 ERROR authentication failed.: authentication failed
@@ -123,3 +130,51 @@ Because `.github/actions/builds/juju_sunbeam_controller/action.yml` contains a b
    `ssh -o ConnectTimeout=5 <gateway_node> true` and record the result in
    `sshuttle_metallb_range.txt`. The gateway node is reachable from the moment sshuttle
    starts; no OpenStack dependency.
+
+---
+
+### Pattern 3: MetalLB speaker wedge stops serving the public Keystone VIP → bootstrap i/o timeout
+
+**Symptom:** Identical to Pattern 1 — during `juju bootstrap`, `jujud` on the freshly-created
+controller VM times out authenticating to the public Keystone VIP:
+```
+caused by: Post "https://<public-VIP>/openstack-keystone/v3/auth/tokens": dial tcp <public-VIP>:443: i/o timeout
+ERROR failed to bootstrap model: subprocess encountered error code 1
+```
+Often preceded (in the serial-console dump) by
+`WARNING juju.provider.openstack networking.go:370 could not resolve internal network id ... failed to get network detail`.
+
+**Root cause:** The public VIP (`openstack/traefik-public-lb`) is announced by **MetalLB in L2
+mode**. When the MetalLB `speaker` processes **wedge** (stay `Running` but their reconcile loop
+dies and they stop answering ARP for the VIP), the VIP becomes unreachable after the ARP cache
+expires — while Keystone itself stays healthy on its ClusterIP path. The bootstrap VM booted
+fine and **cloud-init succeeded** (`Datasource DataSourceOpenStackLocal [net,ver=2]`), so this is
+**not** a datasource/metadata problem and **not** a permanent guest routing gap. See
+`patterns/metallb-speaker-wedge.md` for the full diagnostic.
+
+**Evidence to look for:**
+- `generated/sunbeam/pods_metallb-system_logs.tgz` → all `logs-metallb-system-metallb-speaker-*`
+  stop logging at the **same time, well before the failure**, ending mid-normal `ServiceReconciler`
+  with no error/panic/SIGTERM; log files small (not rotated).
+- `generated/sunbeam/kubectl_get_pod.txt`: metallb pods `Running 1/1`, **0 restarts**, multi-hour
+  age → hung in-process, not a crash/reschedule.
+- `generated/sunbeam/pods_openstack_logs.tgz`: keystone/nova/neutron/traefik-public logs are
+  **current** (collected minutes after the failure) → the anomaly is isolated to MetalLB, not a
+  cluster-wide / log-pipeline outage.
+- Serial console in `run.log`: `Cloud-init ... finished ... Datasource DataSourceOpenStackLocal`
+  (datasource OK) followed by the jujud Keystone-VIP `i/o timeout`.
+
+**Recommendations:**
+1. Investigate why the MetalLB speakers wedged and add liveness/readiness probes so a stalled
+   speaker is killed/rescheduled instead of silently staying `Running` and dropping its VIPs.
+2. Make the step resilient: pre-flight `openstack token issue` (or TCP probe) against the
+   credential `auth_url` from the controller's network and **retry bootstrap on transient
+   `i/o timeout`**.
+
+**Observed in:**
+- Run 30214148446 / UUID `054a43a2-9a10-449a-b216-99ff66a3b8d7`: speakers silent from 02:58:48,
+  failure at 03:17:40 (`dial tcp 10.241.38.132:443: i/o timeout`); openstack pods logged to
+  03:52–03:55.
+- Run 30196037796 / UUID `4f55d457-b9f9-4887-a8b6-31f0233d8064`: speakers silent from 20:46:03,
+  failure at 21:09:35 (`dial tcp 10.241.38.134:443: i/o timeout`); openstack pods logged to
+  21:45–21:48.

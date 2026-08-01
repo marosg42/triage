@@ -288,6 +288,75 @@ onto it. Not a re-run fix — it recurs until the host's MAAS network config is 
 
 ---
 
+### Pattern 6: rabbitmq-server unit stuck in error — `rabbit` app left stopped after coordinated cluster join (juju-wait SIGKILL)
+
+**Symptom:**
+```
+# juju-wait abort (GitHub log / generated/openstack/log.txt):
+subprocess.CalledProcessError: Command '['juju-wait', '-m', 'foundations-maas:openstack',
+  '-t', '14400', '--machine-error-timeout', '1800', '--retry_errors', '5', ...]'
+  died with <Signals.SIGKILL: 9>.
+# (rabbitmq-server is NOT in the -x exclusion list)
+
+# crashdump juju_status.txt:
+rabbitmq-server/2  error    idle  8/lxd/2  ... hook failed: "amqp-relation-changed" for heat:amqp
+rabbitmq-server/0* waiting  idle  6/lxd/1  ... RabbitMQ is clustered, but not all charms are ready
+# all AMQP consumers waiting: barbican/cinder/designate/glance/heat/neutron-api/
+# nova-cloud-controller → "Incomplete relations: messaging" / "'amqp' incomplete"
+
+# unit-rabbitmq-server-<n>.log (crashdump <m>/lxd/<n>/var/log/juju/):
+Error: this command requires the 'rabbit' app to be running on the target node.
+       Start it with 'rabbitmqctl start_app'.
+subprocess.CalledProcessError: Command '['/usr/sbin/rabbitmqctl', 'cluster_status',
+  '--formatter=json']' returned non-zero exit status 64.
+```
+
+**Root cause:** To join the RabbitMQ cluster, the charm runs `rabbitmqctl stop_app`,
+`join_cluster`, then `start_app`, serialized across peers by the charm's coordinator
+("Restart lock" / "Cluster lock"). On the affected unit the app is stopped for the join but
+the restart/cluster lock is **never re-granted** afterwards ("Restart lock not granted"
+repeatedly; no `start_app` command ever runs again). With the `rabbit` app down, the charm's
+`assess_status` path (`amqp-relation-changed` → `assess_cluster_status` → `clustered()` →
+`running_nodes()` → `get_cluster_status()`) calls `rabbitmqctl cluster_status --formatter=json`,
+which exits 64 ("requires the 'rabbit' app to be running"). This raises `CalledProcessError`
+and fails the hook — converting a transient "app stopped to join" window into a **permanent**
+hook error. The unit never leaves `error`, so the amqp/`messaging` relation never completes
+for any consumer, and since rabbitmq-server is not excluded from juju-wait, the wait runs its
+full `-t 14400` (4h) and is SIGKILLed.
+
+**Key distinguishing features:**
+- juju-wait dies with **SIGKILL** (its own 4h timeout), not exit status 1.
+- Exactly one rabbitmq-server unit is in `error`; the peers are `waiting/idle` "RabbitMQ is
+  clustered, but not all charms are ready".
+- The whole OpenStack control plane is `waiting` on "messaging"/"amqp incomplete" — a single
+  rabbitmq unit fans out to a full-deployment stall.
+- Timeline: single "Restart lock granted" early, then `rabbitmqctl stop_app`, then only
+  "Restart lock not granted" — the hook error repeats every retry (e.g. ~52 times) until crashdump.
+
+**Evidence to look for:**
+- `unit-rabbitmq-server-<n>.log`: `stop_app` executed once, no subsequent `start_app`; repeated
+  `cluster_status ... exit status 64` and "requires the 'rabbit' app to be running".
+- `juju_status_foundations-maas_openstack.txt` / crashdump `juju_status.txt`: one rabbitmq unit
+  in error on `amqp-relation-changed`, all AMQP consumers waiting on messaging.
+- GitHub log: juju-wait `-x` list does NOT contain `rabbitmq-server`.
+
+**Investigation steps:**
+1. Confirm juju-wait died with SIGKILL and rabbitmq-server is not excluded.
+2. Find the errored unit in the crashdump juju_status.txt; note its `<m>/lxd/<n>`.
+3. In `unit-rabbitmq-server-<n>.log`, grep `stop_app`, `start_app`, `Restart lock`, and
+   `cluster_status` to confirm the app was stopped and never restarted.
+
+**Recommendation:** Charm-level — `assess_status` should treat `cluster_status` exit 64 /
+"app not running" as a transient waiting state instead of raising and hard-failing the hook,
+so the node recovers on the next coordinator turn. Pipeline-level — auto `start_app` +
+`juju resolved` the stuck unit within the wait window. This is a timing-dependent
+coordinated-restart race, not stale state; a re-run usually succeeds.
+
+**From run:** 30566384159 (UUID 6dd5b264, tor3-sqa-shared_maas dh1_j8_2, branch main,
+2026-07-30; rabbitmq-server/2 on 8/lxd/2).
+
+---
+
 ## Notes
 
 - The `juju_status_foundations-maas_openstack.json` / `.txt` files are captured **at bundle deploy time**, not at failure time. For the authoritative post-failure status, always use the crashdump's `juju_status.txt`.

@@ -54,6 +54,82 @@ mlflow-mysql/2*             error     idle       10.244.2.24         hook failed
 - `generated/github-runner/run.log` or `lastlines.txt`: The `mlflow-server` unit in `waiting` status.
 - Missing `juju-crashdump` files from the bundle preventing further tracing.
 
+**Variant (observed on `ext-sqa-aks`, mysql-k8s rev 423 / 8.0/stable):** the same
+`database-relation-changed` hook failure can hit **multiple** `mysql-k8s` deployments in the
+same run — e.g. both `katib-db/N*` and `mlflow-mysql/N*` leader units in `error` simultaneously.
+Only the **leader** replica fails; the other `mysql-k8s` units in the app stay `active`. The
+surrounding step failure is a `juju wait-for model kubeflow ... --timeout 60m` that times out:
+```
+ERROR timed out waiting for "kubeflow" to reach goal state
+##[error]Process completed with exit code 1.
+```
+Downstream symptoms cascade from the failed DBs:
+- `katib-db-manager`, `kfp-api`, `mlflow-server`: `waiting` — "Waiting for relational-db data"
+- `kfp-persistence`, `kfp-ui`: `blocked` — "[relation:kfp-api] Expected data from exactly 1 related applications - got 0."
+
+To find the failed DBs quickly:
+```bash
+grep -iE "hook failed.*database-relation-changed" <uuid>/generated/lastlines.txt
+```
+
+---
+
+### Pattern 2: mysql-k8s `database-relation-changed` fails — kube-proxy HAIRPIN on self-targeted primary ClusterIP (ext-sqa-aks)
+
+**This is the DEFINITIVE root cause of the recurring `kubeflow_terraform` failures on
+`ext-sqa-aks` (confirmed by live capture on run 30108398444). It is a mysql-k8s charm bug
+exposed by an AKS/CNI hairpin limitation — NOT a Juju version / 3.6-candidate defect.**
+
+**Symptom:** `juju wait-for model kubeflow --timeout 60m` times out; one or more `mysql-k8s`
+leader units (katib-db, kfp-db, mlflow-mysql — any combination) stuck in
+`hook failed: "database-relation-changed"`; consumers (kfp-api, mlflow-server,
+katib-db-manager) `waiting`, kfp-persistence/kfp-ui `blocked`.
+
+**Charm traceback (only visible via live `juju debug-log`, absent from Swift bundles):**
+```
+unit.<app>/N.juju-log database:NN: Timed out waiting for k8s service to be ready
+  File ".../charm/src/relations/mysql_provider.py", line 141, in _on_database_requested
+    self.charm.k8s_helpers.wait_service_ready((primary_endpoint, 3306))
+  File ".../charm/src/k8s_helpers.py", line 205, in wait_service_ready
+    raise TimeoutError
+TimeoutError
+```
+`wait_service_ready` just does `socket.connect_ex((primary_endpoint, 3306))`, retrying
+60×1s (60s total).
+
+**Mechanism:** the `database-relation-changed` hook runs on the **leader** unit and connects
+to the `<app>-primary` ClusterIP Service, whose sole endpoint is the current MySQL **Primary**
+pod. When the leader unit and the Primary are the **same pod** (common — unit `/0` is often
+both), the pod connects to a ClusterIP that DNATs back to itself → **hairpin**, which this AKS
+kube-proxy/CNI does not support. SYN is black-holed (connect errno 11 / timeout, no RST), so
+the 60s wait always expires → hook fails. Juju auto-retries every ~2 min but keeps re-hitting
+the hairpin, so the model never settles and the 60m wait-for expires.
+
+**How to confirm (live env only — needs SSH to runner + juju access):**
+```bash
+# 1) failing unit == leader (*) AND "Primary"?  ->  juju status -m kubeflow <app>
+# 2) mysqld healthy: from the primary pod, its own pod IP:3306 is OPEN
+# 3) HAIRPIN differential test against the <app>-primary ClusterIP:3306
+#    from the primary pod itself  -> closed(11)/timeout
+#    from ANY other pod           -> OPEN
+# 4) kube-proxy is fine globally: kubernetes.default:443 OPEN and the Juju-created
+#    <app> service ClusterIP:3306 OPEN
+```
+If the ClusterIP is reachable from every pod except its own endpoint pod, it is hairpin.
+
+**Why it is NOT the Juju candidate:** Juju does not manage the charm-created
+`<app>-primary`/`<app>-replicas` services and does not program kube-proxy; Juju's own `<app>`
+Service routes fine on the same cluster/agent. The determining factor is leader==primary
+(charm topology), not the Juju build.
+
+**Fixes:**
+1. Charm (mysql-k8s): don't TCP-connect to the primary ClusterIP from the primary pod; check
+   endpoint readiness via the k8s API, or connect to the pod FQDN. Report upstream (rev 423).
+2. Env (AKS/CNI): enable hairpin/loopback for ClusterIP services (kube-proxy hairpinMode /
+   masquerade).
+
+See `outputs/30108398444-analysis.md` for the full live evidence.
+
 ---
 
 _Add more patterns below as they are discovered._
