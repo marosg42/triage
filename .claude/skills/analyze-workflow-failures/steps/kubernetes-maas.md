@@ -186,6 +186,59 @@ grep "adding-vote\|has-vote" generated/juju_maas_controller/log.txt | tail -5
 
 ---
 
+### Pattern 3: `juju deploy` fails immediately — charm not published for the bundle's base/channel
+
+**Symptom:**
+```
+ERROR cannot deploy bundle: cannot resolve charm or bundle "easyrsa":
+  selecting releases: charm or bundle not found for channel "1.34/stable", base "amd64/ubuntu/20.04"
+
+  store.(*CharmAdaptor).ResolveCharm:68
+  deployer.(*bundleHandler).resolveCharmsAndEndpoints:359: cannot resolve charm or bundle "easyrsa"
+
+subprocess.CalledProcessError: Command ['juju', 'deploy', '-m',
+  'foundations-maas:kubernetes-maas', '--debug', '--overlay', ..., '.../bundle.yaml']
+  returned non-zero exit status 1.
+```
+
+The step fails **very fast** (~1-2 minutes) at the initial `juju deploy`, before any machine
+is provisioned or model created.
+
+**Root cause:** The generated bundle pins a charm to a `channel` + `base` combination that
+Charmhub does not publish. Juju resolves every charm against Charmhub *before* creating
+anything; a single unresolvable charm aborts the whole-bundle deploy with exit 1. Common
+trigger: a Charmed Kubernetes track (e.g. `1.34/stable`) drops an older base like
+`ubuntu@20.04` (focal), while the bundle's `default-base` / per-app `base` is still focal.
+
+**Key distinguishing features vs. Patterns 1 & 2:**
+- Failure is at `juju deploy` charm **resolution**, not `add-model` or `juju-wait`
+- Fails in ~1-2 min (not the 4-hour juju-wait timeout, not a ~60s add-model hang)
+- Error text: `charm or bundle not found for channel "<ch>", base "amd64/ubuntu/<ver>"`
+- The model is never created (`model ... not found` in the pre-deploy export-bundle/status
+  probes is expected, not the cause)
+- Controller is healthy — `juju_status_foundations-maas_controller.txt` present; no SSH/infra
+  failures in teardown
+
+**Evidence to look for:**
+```bash
+# The resolution error and which charm/channel/base
+grep -n "cannot resolve charm or bundle\|charm or bundle not found for channel" \
+  generated/kubernetes-maas/log.txt
+
+# Confirm the offending app's pinned base + channel in the bundle
+grep -n -A6 "<charm_name>:" generated/kubernetes-maas/bundle.yaml
+grep -n "default-base" generated/kubernetes-maas/bundle.yaml
+```
+
+**Fix direction:** Re-base the affected charm(s) to a base the channel actually ships
+(e.g. `ubuntu@22.04`), or pin a channel that still publishes the required base. Consider a
+`juju deploy --dry-run` / Charmhub base-availability pre-flight check in the pipeline.
+
+**From run:** 30684110011 (UUID 306c976d, tor3-sqa-shared_maas dh1_j9_1, branch main,
+2026-08-01) — `easyrsa` `1.34/stable` had no `ubuntu@20.04` release.
+
+---
+
 ## Notes
 
 - `vault` is always excluded from juju-wait (`-x vault`); `vault-mysql-router/0` stuck

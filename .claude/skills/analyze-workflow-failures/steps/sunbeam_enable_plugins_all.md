@@ -694,6 +694,57 @@ subprocess.CalledProcessError: Command ['ssh', ..., 'sunbeam', 'enable', '-m', '
 
 ---
 
+### Pattern 3: `wait_for_vault_units_idle` crashes on truncated `juju status` YAML
+
+**Symptom (GitHub Actions log):** the `sunbeam_enable_vault` layer aborts with a Python
+traceback ending in a YAML **stream-end** error, from `enable_features.py:387`:
+
+```
+File ".../products/sunbeam/enable_features.py", line 387, in wait_for_vault_units_idle
+    jst = yaml.safe_load(no_ansi)
+...
+yaml.scanner.ScannerError: while scanning a simple key
+  in "<unicode string>", line NNNN, column 9:
+            sin
+            ^
+could not find expected ':'
+```
+
+The pointer sits at the *last* line of the parsed string (often a partial `since:` field like
+`sin`), and the traceback passes through `yaml/scanner.py` → `fetch_stream_end` →
+`remove_possible_simple_key`. That call chain means the input string **ended mid-line** — i.e.
+the captured `juju status --format yaml` output was truncated, not merely malformed.
+
+**Root cause:** `wait_for_vault_units_idle()` runs `juju status --format yaml -m <model>`,
+strips ANSI, and calls `yaml.safe_load()` **bare, with no error handling or retry**, inside its
+poll loop. If the captured output is truncated by even one short read, the whole layer dies.
+Vault itself is usually fine — the units unseal successfully and end `active/idle`; this is a
+**tooling-robustness bug**, not a Vault deployment failure. The truncation originates either
+juju-side (partial YAML flushed to the pipe while still exiting 0) or capture-side in
+`sqa_common.helpers.run_cmd`'s hand-rolled "live" reader (`selector.select()` + `read1()`),
+whose post-loop `ps.communicate()` **discards** any remaining stdout. Notably,
+`reset_ubuntu_pro_subscriptions()` in the *same file* wraps the identical
+`yaml.safe_load(juju output)` pattern in `except (..., yaml.YAMLError)` — that resilience was
+simply never applied to the vault wait-loop.
+
+**Evidence to look for:**
+- `run_<run_id>_failed.log`: traceback at `enable_features.py:387` → `yaml.safe_load` →
+  `ScannerError`/`fetch_stream_end`; the pointer line is the final line of the string.
+- `generated/sunbeam/output.log`: the per-line DEBUG dump of the parsed status ends abruptly
+  (e.g. at a `message: Successfully provisioned volume ...` line) and the next log entry jumps
+  forward in time to a different phase/model — confirming the string ended there.
+- `generated/sunbeam/output.log`: earlier `sunbeam vault unseal` calls all report `completed`.
+- `generated/sunbeam/juju_status_openstack.txt`: at collection time `vault` is `active` with
+  all `vault/N` units `active/idle` — proving Vault was healthy.
+- The command ran via `local(...)` (look for the `[localhost]:` DEBUG prefix), i.e. "live"
+  capture mode in `run_cmd`, not an SSH-to-node call.
+
+**See also:** `patterns/vault-status-yaml-truncation.md` for full detail and the fix.
+
+**First observed:** run 30727560164 (UUID 860009dd-a6b7-49b3-97d8-76d6ee2ae32e, tor3-sqa-shared_maas dh1_j8_1, branch main, 2026-08-02)
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes

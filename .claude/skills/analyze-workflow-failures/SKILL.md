@@ -56,7 +56,8 @@ This skill is split across files to keep context lean. Only load what you need:
 │   └── test_juju4.md                                  ← per-step logs, patterns, grep hints
 └── patterns/
     ├── maas-snap-apparmor-dbupgrade.md  ← deep-dive on specific recurring bug
-    └── metallb-speaker-wedge.md         ← MetalLB L2 speaker hang → VIP i/o timeout
+    ├── metallb-speaker-wedge.md         ← MetalLB L2 speaker hang → VIP i/o timeout
+    └── vault-status-yaml-truncation.md  ← enable_vault crash on truncated juju status YAML
 ```
 
 After identifying the failed step (Step 2), load the matching step file:
