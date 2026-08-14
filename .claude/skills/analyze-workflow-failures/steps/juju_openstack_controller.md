@@ -166,6 +166,59 @@ usually succeeds.
 
 ---
 
+### Pattern 4: Simplestreams image metadata unreachable — bootstrap aborts in seconds
+
+**Symptom:**
+```
+WARNING Got error requesting "https://ceph-radosgw.<cluster>.<domain>:443/swift/v1/simplestreams/data/streams/v1/index2.sjson": ... EOF   (x3)
+WARNING Got error requesting ".../index2.json": ... EOF                                                (x3)
+ERROR failed to bootstrap model: failed looking for image metadata in keystone catalog:
+  cannot read index data, attempt count exceeded: cannot access URL "..." : EOF
+```
+Followed by `ERROR controller foundation-openstack not found` and FCE's misleading
+`juju controller is bootstrapped but unreachable.` message. `enable_ha` never runs.
+
+**Root cause:** The Juju client on the GitHub runner resolves the `product-streams`
+(image-stream) service from the Keystone catalog and fetches simplestreams metadata from
+its **public** endpoint, which is the ceph-radosgw VIP on **port 443**. If the runner
+cannot complete an HTTPS connection to the cloud's public network on 443, every attempt
+returns `EOF` and bootstrap aborts before any VM is created. Note that every other
+OpenStack public endpoint uses a distinctive high port (keystone 5000, glance 9292,
+nova 8774, …) and keeps working — so the run gets all the way to this step before failing.
+
+**Distinguishing feature vs Patterns 1–3:** total `openstack_bootstrap` duration is
+**~10 seconds**. Patterns 1–3 all take minutes. A sub-30 s bootstrap failure means Juju
+never reached the point of asking Nova for an instance.
+
+**Evidence to look for:**
+- `generated/juju_openstack_controller/log.txt`: exactly 6 `Got error requesting … EOF`
+  warnings (3 × `index2.sjson`, 3 × `index2.json`) within ~8 s
+- `generated/openstack/juju_status_foundations-maas_openstack.json`: `ceph-radosgw`,
+  `hacluster-ceph-radosgw`, `ceph-mon`, `ceph-osd` and `glance-simplestreams-sync` all
+  **active** — GSS message confirms *"metadata uploaded to object store"*
+- `generated/openstack/log.txt`: grep `"product-streams"` to read the exact public URL Juju used
+- Crashdump `<machine>/lxd/<n>/var/log/apache2/access.log` + `error.log` + `haproxy.log`
+  on the radosgw containers: **no entries at all** in the failure window → the connection
+  never arrived; the cloud is not at fault
+- Crashdump syslog on the radosgw containers: `IPaddr2(res_cephrg_*_vip)` shows when/where
+  the public VIP was placed and whether it ever failed over (it usually did not)
+- Check `no_proxy`/`https_proxy`: on this pipeline `squid.internal:3128` appears only as
+  inputs to the weebl/temporal reporting actions, **not** in the `fce build` step env — do
+  not blame the proxy without seeing it in the failing step's `env:` block
+
+**This is an environment/network-path issue**, not a transient cloud fault; retrying on the
+same lab network will fail the same way until runner→public-network:443 reachability is fixed.
+
+**FCE bug exposed:** `foundationcloudengine/juju_cli.py:150-153` — when `juju bootstrap`
+raises, `bootstrap()` calls `is_controller_reachable()`, whose own failure replaces the
+actionable error with `controller … not found`. Always read the *first* `ERROR` in
+`log.txt`, not the final traceback.
+
+**From:** run 31611708854, UUID 0740dc42-91ce-4638-9908-8f16d18a29b4,
+tor3-sqa-shared_maas cluster dh1_j8_2, 2026-08-13.
+
+---
+
 ## Notes
 
 - This step is only used on pure-OpenStack substrates (e.g. `ext-sqa-ps6_openstack`). Not present on MAAS-based substrates.
