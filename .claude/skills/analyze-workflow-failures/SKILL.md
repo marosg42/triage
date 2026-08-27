@@ -42,6 +42,7 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── juju_sunbeam_controller.md                         ← per-step logs, patterns, grep hints
 │   ├── landscape.md                                    ← per-step logs, patterns, grep hints
 │   ├── deploy_charm_mysql.md                           ← per-step logs, patterns, grep hints
+│   ├── deploy_charm_mysql_k8s.md                       ← per-step logs, patterns, grep hints
 │   ├── deploy_charm_postgresql.md                      ← per-step logs, patterns, grep hints
 │   ├── openstack.md                                    ← per-step logs, patterns, grep hints
 │   ├── prepare_shared_maas_clusters_for_deployment.md ← per-step logs, patterns, grep hints
@@ -53,10 +54,12 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── kubeflow_terraform.md                          ← per-step logs, patterns, grep hints
 │   ├── sunbeam_enable_plugins_all.md                  ← per-step logs, patterns, grep hints
 │   ├── sunbeam_test_plugins.md                        ← per-step logs, patterns, grep hints
+│   ├── sunbeam_upgrade_mysql_k8s.md                   ← per-step logs, patterns, grep hints
 │   └── test_juju4.md                                  ← per-step logs, patterns, grep hints
 └── patterns/
     ├── maas-snap-apparmor-dbupgrade.md  ← deep-dive on specific recurring bug
     ├── metallb-speaker-wedge.md         ← MetalLB L2 speaker hang → VIP i/o timeout
+    ├── mysql-k8s-tls-pebble-ready-deadlock.md ← mysql-k8s TLS hook error starves mysql-pebble-ready
     └── vault-status-yaml-truncation.md  ← enable_vault crash on truncated juju status YAML
 ```
 
