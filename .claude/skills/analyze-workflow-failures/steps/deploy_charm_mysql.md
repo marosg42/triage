@@ -389,6 +389,71 @@ grep "moving machine.*to long poll group" admin-mysql-*.log
 
 ---
 
+### Pattern 3: juju wait-for 60m timeout — orphaned `unit-add` lock after a premature reclaim
+
+**Symptom (GitHub Actions log):**
+```
+ERROR timed out waiting for "mysql" to reach goal state
+Process completed with exit code 1.
+```
+
+**Symptom (juju status at timeout):** one unit OFFLINE, one never joining, primary healthy:
+```
+mysql/0*  active       idle  Primary
+mysql/1   maintenance  idle  OFFLINE
+mysql/2   waiting      idle  waiting to join the cluster
+```
+
+**Symptom (logsink.log):**
+```
+unit-mysql-1 ERROR   database-peers:0: Failed to stop instance replication
+unit-mysql-1 ERROR   database-peers:0: Failed to attach instance <ip>:3306 to cluster cluster-<id>
+unit-mysql-1 WARNING database-peers:0: Failed to add instance to cluster. Fallback to clone method
+unit-mysql-2 WARNING database-peers:0: Reclaiming unit-add lock left behind by departed mysql-1  ← key line
+unit-mysql-1 DEBUG   database-peers:0: Failed to release lock unit-add          ← ×2, 50s apart, then gives up
+unit-mysql-1 INFO    Cluster auto-rejoin attempts are exhausted. Attempting manual rejoin
+unit-mysql-1 WARNING Instance does not belong to the cluster. Cannot perform manual rejoin
+unit-mysql-2 DEBUG   Failed to acquire lock unit-add                             ← repeats every ~5 min until timeout
+```
+
+**Root cause:** A race in the charm's `unit-add` rolling lock. The first secondary acquires the
+lock and falls back to the slow **clone** method (~2 minutes). While the clone is still running,
+the second secondary decides the lock holder has "departed", releases the holder's lock and takes
+it. The resulting concurrent add-instance operations both fail. When the clone finally fails, the
+original holder can no longer release its own lock (ownership was mutated underneath it) — it
+retries twice at 50s each, gives up permanently, and drops into an endless OFFLINE rejoin loop.
+The lock stays attributed to the now-dead unit forever, so the remaining unit polls
+`Failed to acquire lock unit-add` until the 60-minute `wait-for` expires.
+
+**How to confirm it is this pattern (and not Pattern 1/2):**
+```bash
+# The decisive line — a reclaim while the holder is still working:
+grep -a "Reclaiming" <crashdump>/.../var/log/juju/logsink.log
+
+# Prove the "departed" unit never actually departed (expect zero hits):
+grep -a "database_peers_relation_departed\|peers-relation-departed" logsink.log
+
+# The orphaned-lock poll loop:
+grep -a "unit-mysql-" logsink.log | grep -a "acquire lock unit-add\|release lock unit-add" | cut -c60-300
+```
+
+**Distinguishing from Pattern 1:** Pattern 1 shows `ERROR 2002 (HY000)` socket errors and
+`Failed to check if local cluster metadata exists` every ~5s. This pattern shows no socket errors —
+mysqld is up on all units and the primary is healthy; the blockage is purely the lock.
+
+**Example (run 36406634567, UUID 382099b6, tor3-sqa-sunbeam cluster_2, 2026-09-28):**
+```
+10:19:58  mysql/1 acquires unit-add, addInstance fails
+10:20:01  mysql/1 starts clone fallback (2 min)
+10:20:20  mysql/2 "Reclaiming unit-add lock left behind by departed mysql-1"  ← mysql/1 still alive
+10:20:24  mysql/2 attach fails (concurrent op), releases lock
+10:22:01  mysql/1 clone fails; release attempts fail at 10:22:51 and 10:23:42, then abandoned
+10:24:35+ mysql/2 fails to acquire the lock 15 times through 11:21:34
+11:12:27  juju wait-for times out (60m after step start at 10:12:27)
+```
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes

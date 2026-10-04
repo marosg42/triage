@@ -52,6 +52,45 @@ The GHA action `.github/actions/builds/k8s-clouds/action.yaml` unconditionally t
 
 ---
 
+### Pattern 2: Azure AKS GPU VMSS Overconstrained Allocation
+
+**Symptom:**
+```
+Error: creating Kubernetes Cluster (...): polling after CreateOrUpdate:
+Status: "OverconstrainedAllocationRequest"
+Code: "OverconstrainedAllocationRequest"
+Message: "Create or update VMSS ... failed. Allocation failed. VM(s) with the
+following constraints cannot be allocated, because the condition is too restrictive.
+Constraints applied are:
+  - Networking Constraints (such as Accelerated Networking or IPv6)
+  - VM Size"
+
+with module.aks_cluster[0].azurerm_kubernetes_cluster.k8s,
+on modules/aks/main.tf line 19, in resource "azurerm_kubernetes_cluster" "k8s"
+Process completed with exit code 1.
+```
+
+**Root cause:**
+Azure could not allocate the requested AKS node-pool VM size in the selected region.
+This is most likely with GPU SKUs such as `vm_size = "small_tesla"` mapping to
+`Standard_NC6s_v3` in `eastus`. The pipeline successfully reaches Terraform apply,
+but the Azure capacity/allocation API rejects the VMSS for the AKS node pool.
+
+**Evidence to look for:**
+- `generated/github-runner/run.log`: Terraform plan shows `vm_size = "small_tesla"`
+  and node profile `vm_size = "Standard_NC6s_v3"`, then `azurerm_kubernetes_cluster.k8s`
+  stays in "Still creating..." before failing with `OverconstrainedAllocationRequest`.
+- The same log should show the resource group was created, then subsequent
+  "Get AKS kubeconfig" / storage output steps were skipped.
+- `config/cloud.tfvars`: confirms `cloud_provider = "azure"`, `vm_type = "gpu"`,
+  and the selected `vm_size`.
+
+**Remediation:**
+Retry when regional capacity changes, or select a different Azure region/SKU
+with available GPU capacity.
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes

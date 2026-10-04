@@ -239,6 +239,77 @@ grep -n "default-base" generated/kubernetes-maas/bundle.yaml
 
 ---
 
+### Pattern 4: `not master and slaveOk=false` — Juju HA controller lost MongoDB quorum (hypervisor OOM)
+
+**Symptom:**
+```
+ERROR:root:ERROR checking entity "user-admin" has permission: while obtaining controller user:
+  while obtaining controller user: not master and slaveOk=false
+
+ERROR:root:juju status --format=json failed: 1
+
+subprocess.CalledProcessError: Command ['juju-wait', '-m', 'foundations-maas:kubernetes-maas', ...]
+returned non-zero exit status 1.
+```
+
+**Root cause:** On `virtual_maas`, the physical hypervisor exhausts RAM once
+`kubernetes-maas` starts all six workload node VMs, and the kernel OOM-kills the largest
+guests — typically two of `infra1`/`infra2`/`infra3`. Juju HA places its three controller
+members one per availability zone, and zones map 1:1 to the infra hosts
+(`zone1`→infra1, `zone2`→infra2, `zone3`→infra3). Losing two infra guests therefore removes
+2 of 3 MongoDB replica-set members; the survivor is demoted to secondary and rejects reads
+with `not master and slaveOk=false`. The controller never recovers — quorum cannot be
+regained.
+
+The lab config actively enables this: `config/vms.yaml` sets
+`memory_over_commit_ratio: 10` / `cpu_over_commit_ratio: 10` on every infra KVM pod, while
+each infra guest *also* hosts nested VMs (`juju` 4G + `vault` 4G + `microk8s` 8G = 16 GiB).
+
+**Key distinguishing features vs. Pattern 1 (controller unreachable):**
+- The controller API is still **answering** — the error is a MongoDB-level rejection, not
+  `health ping timed out` / `connection is shut down`.
+- Failure comes minutes after the deploy was visibly healthy, not at the 4h timeout.
+- Afterwards the API degrades to `unable to connect to API: EOF` and eventually hangs.
+
+**Evidence to look for:**
+```bash
+# The quorum signature
+grep -n "not master and slaveOk=false" generated/kubernetes-maas/log.txt
+
+# Which controller member sat in which zone (archive proof of 2-of-3 loss)
+grep -o "'hostname': 'juju-[0-9]'[^}]*availability-zone=zone[0-9]" \
+  generated/juju_maas_controller/log.txt | tail -3
+
+# The overcommit config that permits the OOM
+grep -n "over_commit_ratio" config/vms.yaml
+
+# When each infra guest died (probe targets 10.241.144.2 = infra1)
+tail -5 generated/sshtest.txt
+
+# Controller never returns
+grep -n "unable to connect to API: EOF" generated/version_collector_kubernetes-maas.log
+```
+
+Expect **no** `juju_status_*`, **no** `juju-crashdump-*` and **no**
+`generated/maas/logs-*.tgz`, and a failing `Collect logs` step where every `juju dump-db`
+errors across all controllers — all cascade effects of the dead infra.
+
+**Confirming the OOM:** the hypervisor-level proof (`/var/log/libvirt/qemu/infra<N>.log`
+`shutting down, reason=crashed`; `dmesg` `Out of memory: Killed process ... qemu-system-x86`
+under `machine-qemu-<N>-infra<N>.scope`) is **only** available live — it is not in the
+bundle, because log collection fails. From the archive alone, treat the combination of
+quorum-loss signature + dead sshtest probe + total collection failure as sufficient.
+
+**Fix direction:** size the virtual lab guests to fit physical host RAM and account for the
+nested guests when setting the pod overcommit ratio; add a host memory-headroom gate before
+`kubernetes-maas`; poll `virsh domstate --reason` during `juju-wait` and abort on
+`shut off (crashed)`.
+
+**From run:** 35161423491 (UUID 510468f0, tor3-sqa-virtual_maas cluster_4, branch main,
+2026-09-17) — infra1 OOM-killed 01:02:59, infra3 01:08:47, juju-wait failed 01:09:19.
+
+---
+
 ## Notes
 
 - `vault` is always excluded from juju-wait (`-x vault`); `vault-mysql-router/0` stuck

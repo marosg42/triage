@@ -187,6 +187,78 @@ grep "invalid runtime symbol table\|invalid pc-encoded table" \
 **Recommendation:** Recycle/reprovision the suspect node (fresh image clears the corrupt
 binary); optionally add a `snapd` health pre-check to `clean_disks.py` for clearer triage.
 
+### Pattern 5: shared MAAS transient DNS failure during first node SSH
+
+**Symptom (in GitHub Actions / layer log):**
+```text
+ssh: Could not resolve hostname solqa-shared-maas-server-10.maas: Temporary failure in name resolution
+subprocess.CalledProcessError: Command '['ssh', ..., 'solqa-shared-maas-server-10.maas', '--',
+'ls', '-l', '/dev/disk/by-dname', '||', 'exit', '0']' returned non-zero exit status 255.
+```
+
+**Root cause:** On `tor3-sqa-shared_maas`, `sunbeam_prepare_env` does not generate `/etc/hosts`
+entries on the GitHub runner (that action is virtual-MAAS-only), so `clean_disks.py` depends on
+MAAS DNS for the freshly provisioned node names. If the first lookup returns a transient resolver
+failure, SSH exits 255 and the step aborts because `clean_disks.py` does not retry DNS/SSH failures.
+Later log collection may successfully reach the same hostname once DNS recovers.
+
+**Quick check:**
+```bash
+# Terraform succeeded and emitted node hostnames immediately before the failure
+grep -n "Apply complete\\|nodes =\\|solqa-shared-maas-server" generated/sunbeam/output.log
+
+# The failing SSH lookup and traceback
+grep -n "Temporary failure in name resolution\\|CalledProcessError\\|/dev/disk/by-dname" \
+  generated/sunbeam/output.log
+
+# Confirm this is shared MAAS and hosts-file generation was skipped/empty
+grep -n "substrate: tor3-sqa-shared_maas\\|Generate hosts file in GH runner for virtual MAAS" \
+  generated/github-runner/run.log
+test ! -s generated/sunbeam/hosts && echo "no runner hosts entries"
+
+# If post-failure collection later reaches the same host, the DNS failure was transient
+grep -n "sosreport-.*server-10\\|Permanently added 'solqa-shared-maas-server-10.maas'" \
+  generated/sunbeam/output.log
+```
+
+**Recommendation:** Add retry/backoff around the first SSH call in `clean_disks.py` or generate
+runner-side host entries for shared-MAAS Terraform outputs before node preparation.
+
+### Pattern 6: testflinger transient SSH banner failure during disk probe
+
+**Symptom (in GitHub Actions / layer log):**
+```text
+kex_exchange_identification: banner line contains invalid characters
+banner exchange: Connection to 10.241.4.20 port 22: invalid format
+subprocess.CalledProcessError: Command '['ssh', ..., '<node>.maas', '--',
+'ls', '-l', '/dev/disk/by-dname', '||', 'exit', '0']' returned non-zero exit status 255.
+```
+
+**Root cause:** On `tor3-sqa-testflinger`, `sunbeam_prepare_env` can reach a freshly deployed
+node's port 22 but fail the SSH protocol banner exchange before authentication. Node sosreport
+logs may show only `Connection closed ... [preauth]`, while later post-failure sos collection
+successfully SSHes to the same node, confirming a transient SSH service/connection failure rather
+than a missing host, missing disk, or permanent node outage. `clean_disks.py` does not retry the
+initial `/dev/disk/by-dname` inventory command, so a single SSH exit 255 aborts the layer.
+
+**Quick check:**
+```bash
+# Failing inventory command and SSH banner error
+grep -n "banner line contains invalid characters\|banner exchange: Connection.*invalid format\|/dev/disk/by-dname" \
+  generated/sunbeam/output.log
+
+# Confirm the same node became reachable later during sos collection
+grep -n "sosreport-<node>\\|Permanently added '<node>.maas'" generated/sunbeam/output.log
+
+# Node-side sshd usually records only a preauth close for the failed attempt
+SOS=$(find generated/sunbeam -name 'sosreport-<node>-*.tar.xz' | head -1)
+tar -xOf "$SOS" '*/sos_commands/logs/journalctl_--no-pager_--boot' \
+  | grep 'sshd' | grep 'preauth\|Accepted publickey'
+```
+
+**Recommendation:** Add retry/backoff around `clean_disks.py` SSH probes on Testflinger nodes,
+especially for exit 255 before authentication.
+
 ---
 
 _Add more patterns below as they are discovered._
@@ -199,4 +271,3 @@ _Add more patterns below as they are discovered._
   (it hosts the MAAS regiond that serves API requests and the HA PostgreSQL standby)
 - If `maasserver_routable_pairs` errors appear before any snap refresh event, the DB may
   have been left in a broken state by a previous run's failed refresh (Variant A residue)
-

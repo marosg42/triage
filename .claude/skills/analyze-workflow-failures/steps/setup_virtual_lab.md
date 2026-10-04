@@ -106,6 +106,33 @@ All attempts failed for 10.241.144.4
 - `.github/actions/setup/setup-tunnel/action.yml`: after `sshuttle` starts, the action exits immediately if any of `10.241.144.2/.3/.4` fails validation
 - Artifact tree: `generated/sshtest.txt` is absent because the failure happened before the background probe was launched; `generated/maas/logs-*.tgz` is also absent, leaving no per-node guest logs for deeper diagnosis
 
+### Pattern 4: Testflinger pool has zero available relay agents
+
+**Symptom:**
+```text
+testflinger-submitter INFO Deploying 1 machines on ['sqa-virtual-maas'] with distro jammy and disk setup virtual_maas
+testflinger-submitter WARNING Job needs 1 nodes but only 0 are available. Retry in 10 minutes
+----- Agents from queue -----
+Name                 State      Streak
+alarmmonkey          reserve    93
+...
+----- Available Agents -----
+Name                 State      Streak
+----------------------------------------
+testflinger-submitter ERROR Failed to find 1 available nodes in 30 minutes.
+Failed to deploy 1 machines, only 0 were deployed
+All attempts failed
+```
+
+**Root cause:** The virtual MAAS relay VM is requested from the `sqa-virtual-maas` Testflinger queue, but no queue agents are available. The action retries the submitter multiple times; if every poll shows the available-agent list empty and all advertised agents remain in `reserve`, no relay VM is provisioned. The step exits before LXD setup, SSH key preparation, `sshuttle`, MAAS login, or any downstream deployment layer can run. This is a Testflinger/lab-infrastructure capacity or wedged-reservation issue, not a failure in MAAS/Juju/Sunbeam deployment logic.
+
+**Evidence to look for:**
+- `generated/github-runner/run.log`: repeated `Job needs 1 nodes but only 0 are available`, followed by `Failed to find 1 available nodes in 30 minutes` and `Failed to deploy 1 machines, only 0 were deployed`
+- Every `Agents from queue` snapshot has agents in `reserve` and an empty `Available Agents` section
+- The final output selection step prints `All attempts failed`
+- Later setup stages (`Setup LXD`, `Prepare virtual MAAS keys`, `Setup tunnel`, `Login to shared virtual MAAS`) are skipped
+- `generated/sshtest.txt` and `generated/maas/maas-api` are absent because the run never reached tunnel setup or MAAS login
+
 ---
 
 _Add more patterns below as they are discovered._
@@ -115,4 +142,3 @@ _Add more patterns below as they are discovered._
 - This step is specific to `tor3-sqa-virtual_maas`; no MAAS tgz may exist when failure happens before or during tunnel validation.
 - `setup-tunnel` validates the virtual MAAS network by probing `10.241.144.2`, `10.241.144.3`, and `10.241.144.4` after launching `sshuttle` through the Testflinger relay.
 - `virsh start` success alone is not enough to prove the infra VMs booted correctly; the decisive signal is SSH reachability through the tunnel.
-

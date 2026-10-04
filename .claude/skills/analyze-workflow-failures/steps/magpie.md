@@ -534,6 +534,95 @@ All five share the identical command, error signature, and ~63 s runtime before 
 
 ---
 
+### Pattern 8: Single node wedges in the post-install reboot — firmware PXE-boots, installed OS never signals MAAS → 30-min timeout
+
+**Symptom (FCE magpie/log.txt and GitHub Actions log):**
+```
+foundationcloudengine.layers.magpielayer INFO Deployed: 3/4
+Status: {'node1': 'Deployed', 'node2': 'Deployed', 'node3': 'Deploying', 'node4': 'Deployed'}
+… (repeated every 30s for the full 30 minutes) …
+Exception: Nodes did not reach Deployed state after 1800 seconds.
+```
+All other nodes reach `Deployed` in ~5 minutes; exactly one node stays `Deploying`
+(MAAS substatus `Deploying: Rebooting`) with **no** `Failed deployment`.
+
+**Juju machine status at collection time:**
+```json
+"machine-status": {"current": "allocating", "message": "Deploying: Rebooting", "since": "..."}
+```
+The `since` timestamp equals the moment the node's ephemeral environment shut down for
+the final reboot — the node never progressed past `Rebooting`.
+
+**Root cause:** After curtin completes the install, MAAS sets the node substatus to
+`Deploying: Rebooting` (== the moment the ephemeral environment shuts down) and the VM's
+iPXE firmware PXE-boots: DHCPDISCOVER/OFFER, then DHCPREQUEST/ACK and `GET /ipxe.cfg` +
+`GET /ipxe.cfg-<mac>` (agent `iPXE/1.21.1`), all served 200 OK. The node then goes **totally
+silent** — the installed OS never boots far enough to run cloud-init (no second DHCP, no
+MAAS metadata contact), so the post-reboot "Image Deployed" signal never arrives, MAAS holds
+the node in `Deploying: Rebooting`, and FCE times out after 1800 s. The in-guest failure
+mode (firmware→local-disk boot handoff hang vs. installed-OS kernel boot hang) is not
+determinable from the bundle: node VMs live on the relay hypervisor
+(`qemu+ssh://ubuntu@<relay>/system` per `config/nodes.yaml`), whose libvirt/qemu state is
+not collected, and the installed OS does not log to the serial console (post-reboot console
+is silent for healthy nodes too).
+
+> **Trap — do NOT read the post-reboot DHCP as the installed OS booting.** The
+> DISCOVER/OFFER/REQUEST/ACK + `ipxe.cfg` exchange after the ephemeral shutdown is the
+> **iPXE firmware PXE-boot** (check the HTTP agent: `iPXE/1.21.1...`), not installed-OS
+> cloud-init. Healthy siblings perform the identical exchange and then DEPLOY within ~20–30 s
+> (their installed-OS cloud-init makes its own DHCP/metadata contact). A node with **no**
+> traffic after its `ipxe.cfg` fetch never booted the installed OS. (An earlier draft of this
+> pattern misread this exchange as installed-OS cloud-init and localized the wedge "after
+> DHCP, before metadata" — the iPXE agent string settles it.)
+
+**Evidence to look for:**
+
+- `generated/magpie/log.txt`: N-1 nodes `Deployed` quickly; the affected node `Deploying`
+  on every poll until the 1800 s exception — never `Failed deployment`
+- `generated/magpie/juju_status_foundations-maas_magpie.json`: affected machine
+  `pending`, message `Deploying: Rebooting`, `since` == ephemeral-shutdown time
+- MAAS syslog: affected node has `ALLOCATED→DEPLOYING`, served PXE + curtin, final curtin
+  status posts, but **no `DEPLOYING→DEPLOYED` transition** (siblings have one, ~30–60 s
+  after their reboot)
+- dhcpd + rackd logs (all rack controllers): affected node MAC shows `DHCPDISCOVER`/`OFFER`
+  then `DHCPREQUEST`+`DHCPACK` and `GET /ipxe.cfg[-<mac>]` (agent `iPXE/1.21.1`) from the
+  **firmware PXE-boot** ~10–14 s after its ephemeral console ends — then **zero events from
+  that MAC/IP for the rest of the run**. Per-minute contact counts collapse to 0. This proves
+  the installed OS never booted and localizes the wedge to the firmware→disk-boot transition.
+- Guest console (`maas-machine` relay in host syslog) stops at the ephemeral shutdown for
+  **all** nodes (healthy ones included) — silence after that point is normal, not evidence
+- Exonerations: no snap refreshes, no OOM/Temporal/regiond/rackd/power errors in the
+  window; `sshtest.txt` clean; controller model active/idle
+
+**Distinguishing from Patterns B / C / 6:**
+
+| | Pattern B | Pattern C | Pattern 6 | Pattern 8 |
+|---|---|---|---|---|
+| Nodes affected | one `Failed deployment` | all `Deploying` | all slow, OAuth exit 2 | **one `Deploying`, rest fast `Deployed`** |
+| Ephemeral install | failed | completed (slow) | completed | **completed (fast, exit 0)** |
+| Post-reboot DHCP | n/a | yes (late) | yes | **yes, then silence** |
+| FCE polling | normal | normal | degrading reads, exit 2 | normal |
+| Failure point | ephemeral boot | OS download/install | MAAS backend hang | **post-reboot boot transition** |
+
+**Retryable:** Yes. Transient node-local guest wedge on a healthy hypervisor (live-env
+forensics in one occurrence showed ~1 spinning vCPU, flat NIC/block counters, silent
+serial pty). Re-running re-deploys the VM. Node successfully commissioned earlier in the
+same run, confirming it is not permanently broken.
+
+**From run 33738284104 (UUID 93ae9fa6-40f4-40ee-a2fc-7ad0e49ab99c, tor3-sqa-virtual_maas
+cluster_5, main, 2026-09-03):**
+
+node3 (pc4rtf, 10.241.144.87, MAC 52:54:56:58:05:01): ALLOCATED 10:58:35, DEPLOYING
+10:58:37, PXE 10:59:01, final curtin posts 11:02:17–23, console end 11:02:23, substatus
+`Rebooting` since 11:02:25; **firmware** PXE-boot DISCOVER 11:02:33–34, REQUEST+ACK
+11:02:37, `ipxe.cfg` GET 11:02:38 (agent iPXE/1.21.1), then zero network events through
+12:01 (per-minute counts 269/132/90/78 → 0). Siblings node1/2/4: identical iPXE exchange
+11:02:47–48, DEPLOYED 11:03:10–11. FCE timeout 11:29:16. happy-bot live forensics confirmed
+a running-but-inert guest on relay 10.241.144.1 (in-place ACPI reboot, ~1 spinning vCPU,
+no disk reads, silent serial pty) — installed OS never booted.
+
+---
+
 ## Notes
 
 - Deploys are issued sequentially per network space; any space can be the one that fails

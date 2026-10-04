@@ -90,6 +90,55 @@ subprocess.CalledProcessError: Command '['juju-wait', '-m', 'foundations-maas:mi
 
 ---
 
+### Pattern 2: `peer-relation-changed` wedge after `refresh-certs` races snapd service-control
+
+**Symptom (GitHub Actions log):**
+```
+ERROR:root:microk8s/1 failed: workload status is error
+subprocess.CalledProcessError: Command '['juju-wait', '-m', 'foundations-maas:microk8s',
+  '-t', '14400', '--machine-error-timeout', '1800', '--retry_errors', '0',
+  '--workload', '--verbose']' returned non-zero exit status 1.
+```
+
+**Unit debug log shows:**
+```
+Execute: microk8s refresh-certs -e server.crt
+error: snapctl: snap "microk8s" has "service-control" change in progress
+Failed to restart service microk8s.daemon-kubelite.
+subprocess.CalledProcessError: Command '['microk8s', 'refresh-certs', '-e', 'server.crt']' returned non-zero exit status 4.
+```
+
+On later automatic hook retries, the same unit may fail earlier with:
+```
+Connection failed. The joining node (<unit-ip>) is already known to dqlite (504).
+```
+
+**Root cause:** The `microk8s` charm successfully runs `microk8s join`, then immediately runs
+post-join certificate reissue (`microk8s refresh-certs -e server.crt`) to add the unit IP as a
+kube-apiserver SAN. If snapd is still processing the join's service-control change, `refresh-certs`
+cannot restart `microk8s.daemon-kubelite` and exits 4. The hook errors before its joined state is
+committed, so subsequent Juju retries call `microk8s join` again; because the node was already
+added to dqlite, join fails with "already known to dqlite (504)" and the unit remains permanently
+in `error`.
+
+**Evidence to look for:**
+- `generated/microk8s/juju-crashdump-*/debug_log.txt` or `var/log/juju/unit-microk8s-N.log`:
+  initial `microk8s join <leader>:25000/<token>`, followed by `refresh-certs` failures with
+  `service-control change in progress`.
+- Later retry sequence: repeated `microk8s join` failures saying the joining node is already known
+  to dqlite.
+- Final crashdump `juju_status.yaml`: application/unit in `error` with
+  `hook failed: "peer-relation-changed"` while machines are still `started`/`running`.
+- Compare other units: a sibling unit may run `refresh-certs -e server.crt` once successfully and
+  reach `active`, showing the failure is a timing race on one node rather than a MAAS deployment
+  failure.
+
+**Likely fix:** Make the charm's join path idempotent: treat "already known to dqlite" as
+already-joined and complete the remaining configuration, and add longer backoff/retry handling for
+snapd `service-control change in progress` during `refresh-certs`.
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes
@@ -97,4 +146,3 @@ _Add more patterns below as they are discovered._
 - The failing machine is typically on a specific zone (zone3 in the observed run); other zones succeed. No persistent zone network issue has been identified.
 - The microk8s charm takes 15-30+ minutes to fully deploy (snap install + cluster formation) — expect long `executing`/`maintenance` periods in juju-wait output.
 - `juju export-bundle -m foundations-maas:microk8s` will fail if the model doesn't exist yet (expected at step start).
-

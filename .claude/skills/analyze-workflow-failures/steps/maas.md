@@ -1652,3 +1652,277 @@ with continuous `lost burst connection` RPC churn on the degraded nodes.
 **From run:** 28909652458 (UUID `9a8aef33-a5cc-4e9b-b96d-1f1c17b70bbb`, tor3-sqa-dedicated_maas,
 cluster dh1-j2, MAAS 3.5.13, branch main, 2026-07-08). Degraded: `sfgqab` (sunset/10.241.128.3),
 `n3m8tf` (anahuac/10.241.128.2); running: `7peq8p` (noma/10.241.128.4); region VIP 10.241.128.5.
+
+### Pattern 26: `maas:postgres` SSH reset during PostgreSQL HA bootstrap → exit 255
+
+**Symptom (FCE `maas/log.txt` / GitHub failed log):** the maas layer fails early in
+`maas:postgres`, before MAAS packages are installed:
+
+```
+root ERROR [root@10.241.128.3] Command failed: ssh ... ubuntu@10.241.128.3 -- sudo \
+  'bash --login -c '"'"'systemctl disable postgresql@16-main.service'"'"''
+kex_exchange_identification: read: Connection reset by peer
+...
+subprocess.CalledProcessError: Command '['ssh', ..., 'ubuntu@10.241.128.3', '--',
+  'sudo', "bash --login -c 'systemctl disable postgresql@16-main.service'"]'
+returned non-zero exit status 255.
+```
+
+Variant observed with the same root cause:
+```
+root ERROR [root@10.241.128.4] Command failed: ssh ... ubuntu@10.241.128.4 -- sudo \
+  'bash --login -c '"'"'systemctl daemon-reload'"'"''
+kex_exchange_identification: banner line contains invalid characters
+...
+subprocess.CalledProcessError: Command '['ssh', ..., 'ubuntu@10.241.128.4', '--',
+  'sudo', "bash --login -c 'systemctl daemon-reload'"]'
+returned non-zero exit status 255.
+```
+
+The traceback is in `pgsql.deploy_postgresql_ha()` →
+`disable_postgresql_systemd_units()` while FCE is disabling the PostgreSQL systemd units
+on the dedicated MAAS infra nodes.
+
+**Root cause:** A transient SSH/network-path failure between the CI runner and the
+dedicated MAAS infra fabric resets one SSH connection during key exchange, before
+authentication and before the remote command starts. FCE treats the SSH transport error as
+fatal and does not retry the idempotent `systemctl disable` command, so the whole maas layer
+fails even though the target node and PostgreSQL setup are otherwise healthy.
+
+**Evidence to look for:**
+
+```bash
+# FCE/GitHub log: direct transport failure
+grep "kex_exchange_identification\\|disable postgresql@16-main" \
+  <work_dir>/<uuid>/generated/maas/log.txt
+
+# Target node syslog: no new user session or command at the failing timestamp
+grep "2026-.*02:1[45]" <work_dir>/maas-logs/<target-ip>/<target-ip>/var/log/syslog
+
+# Rule out node failure
+grep -Ei "oom|panic|segfault|I/O error|link.*down|reset|sshd" \
+  <work_dir>/maas-logs/<target-ip>/<target-ip>/var/log/syslog
+```
+
+**Distinguishing evidence:**
+- The failing command has SSH exit code 255 and `kex_exchange_identification: read:
+  Connection reset by peer` or `banner line contains invalid characters`, not an
+  apt/dpkg/PostgreSQL error.
+- The target node's syslog shows the preceding commands executing and the node continuing
+  normal cron/systemd activity afterwards, but no new user session for the failing command.
+- There are no kernel, disk, OOM, link-flap, or sshd errors on the target during the window.
+- Later MAAS/Juju features are `not_reached`; this happens before MAAS itself is installed.
+
+**Recommendation:** Retry the layer/run. Add bounded retries for SSH transport errors in
+FCE remote execution, especially around idempotent PostgreSQL HA bootstrap commands, and
+investigate runner-to-fabric middleboxes if the pattern recurs.
+
+**From run:** 36209242264 (UUID `1bb91641-850e-4523-94ba-d7ea8ea9fdaa`,
+tor3-sqa-dedicated_maas, cluster dh1-j2, target `sunset`/10.241.128.3, branch main,
+2026-09-26).
+
+Second occurrence: run 36136473121 (UUID `5a8ae996-7fc6-43bc-9400-4ca6753d475b`,
+tor3-sqa-dedicated_maas, cluster dh1-j2, target `noma`/10.241.128.4, branch main,
+2026-09-25). The failing command was `systemctl daemon-reload` and the SSH client reported
+`banner line contains invalid characters`. The target journal showed exactly one preauth close
+on noma at the failure timestamp, while sibling nodes had zero preauth closes.
+
+### Pattern 26a: `install_kvm=True` first-boot package install loses rack squid proxy during MAAS proxy restart → node stuck in `Deploying`
+
+**Symptom (FCE `maas/log.txt`):**
+```
+maas root machine deploy <node5_id> install_kvm=True
+maas root machine deploy <node6_id> register_vmhost=True
+...
+foundationcloudengine.layers.configuremaas DEBUG {'node5': 'Deploying', 'node6': 'Deployed'}
+...
+Exception: Not all KVM hosts were deployed in time.
+```
+One node deployed with `install_kvm=True` completes curtin and sends the first
+`netboot-finished` signal, then boots the installed OS and fetches first-boot MAAS vendor-data,
+but never sends the second deployment-complete signal. A sibling `register_vmhost=True` node may
+complete normally.
+
+**Root cause:** MAAS injects a first-boot cloud-init package install for `install_kvm=True`
+(`libvirt-daemon-system`, `libvirt-clients`, and the qemu/spice/ovmf dependency closure). The
+installed OS uses a per-node rack proxy from `/etc/apt/apt.conf.d/90curtin-aptproxy`. If MAAS
+restarts that rack's squid proxy via pebble while the node is downloading packages, port 8000
+briefly closes and apt fetches fail with `Unable to connect to <rack-ip>:8000`. Cloud-init's
+`package_update_upgrade_install`/`modules:final` fails, MAAS logs installation-failure events but
+leaves the machine in `Deploying`, so FCE only fails after `_wait_for_deployed` times out.
+
+**Evidence to look for:**
+
+```bash
+# FCE timeout with one install_kvm node stuck
+grep "machine deploy .*install_kvm=True\|Not all KVM hosts were deployed\|{'node5': 'Deploying'" \
+  <work_dir>/<uuid>/generated/maas/log.txt
+
+# First-vs-second deploy signals: failing node has one, healthy node has two
+grep "netboot-finished (workflow: deploy, id: deploy:<system_id>" \
+  <work_dir>/maas-logs/*/var/log/syslog
+
+# Rack proxy restart in the same second as package downloads
+grep "Service \"proxy\" stopped\|Service \"proxy\" starting\|Closing HTTP(S) port 8000" \
+  <work_dir>/maas-logs/<rack-ip>/var/log/syslog
+
+# Node package downloads stop at the proxy restart timestamp
+grep "<node_ip>.*squid.*\\.deb" <work_dir>/maas-logs/<rack-ip>/var/log/syslog
+```
+
+The exact apt failure is usually only visible from the installed node's
+`/var/log/cloud-init-output.log` (via live access or read-only VM disk forensics), not from the
+standard MAAS archive.
+
+**From run:** 36255723521 (UUID `7e899ac3-aa75-4d82-b48b-05898c79f6d2`,
+tor3-sqa-virtual_maas cluster_6, MAAS snap rev 43063, branch main, 2026-09-26). node5
+`ddf4at` used infra2 proxy `10.241.144.3:8000`; infra2 restarted proxy at 18:04:44 while node5
+was downloading KVM/libvirt dependencies; node5 stopped metadata posts at 18:04:52 and remained
+`Deploying` until FCE timed out at 18:27:48.
+
+### Pattern 26: On-demand LXD snap install fails due to transient DNS outage → `/snap/bin/lxd` missing
+
+**Symptom (GitHub Actions / `generated/maas/log.txt`):** the `maas` layer fails in
+`maas:setup_vm_host` while running `lxd init --preseed` on all MAAS infra nodes:
+
+```
+STDOUT: Installing LXD snap, please be patient.
+STDERR: ConnectionResetError: [Errno 104] Connection reset by peer
+/usr/sbin/lxd: 18: exec: /snap/bin/lxd: not found
+subprocess.CalledProcessError: ... "lxd init --preseed" returned non-zero exit status 127.
+```
+
+**Root cause:** the infra image has the Debian `lxd-installer` wrapper but not the LXD snap.
+First use of `/usr/sbin/lxd` triggers `snap install lxd --channel=5.21/stable/ubuntu-24.04`.
+If DNS resolution to the Snap Store CDN fails during that on-demand install, snapd aborts the
+download, `/snap/bin/lxd` is never created, and the wrapper exits 127. When all infra nodes fail
+at the same timestamp with `lookup canonical-lgw01.cdn.snapcraftcontent.com: no such host`, this
+is a transient lab DNS / upstream resolver outage rather than an LXD or MAAS logic error.
+
+**Evidence to look for:**
+
+```bash
+# FCE failure and wrapper output
+grep -n "lxd init --preseed\|/snap/bin/lxd: not found\|ConnectionResetError" \
+  files/<UUID>/generated/maas/log.txt
+
+# Per-node snapd DNS failure
+grep -aRh "Installing snap \"lxd\"\|Download snap .*lxd.*no such host\|Download snap .*core24.*no such host" \
+  files/<UUID>/maas-logs/*/*/var/log/syslog
+
+# For virtual_maas, rule out SSH tunnel loss
+tail -80 files/<UUID>/generated/sshtest.txt
+```
+
+**Recommendation:** retry the run/layer after DNS recovers. For durability, pre-install the LXD
+snap in the infra image or add bounded retry around the `lxd init` / snap install path so a short
+DNS hiccup does not fail the entire MAAS layer.
+
+**From run:** 36315783464 (UUID `90cfdf45-5ff7-4a31-9c3a-501bafa22c6d`,
+tor3-sqa-virtual_maas cluster_1, branch main, 2026-09-27).
+
+### Pattern 27: Corosync config copied after peer auto-start, but only node1 restarted → split single-node partitions → `crm status` wait hangs until cancellation
+
+**Symptom (FCE `generated/maas/log.txt` / runner log):** the maas layer stops making progress
+during early HA setup immediately after PostgreSQL/Corosync/Pacemaker package installation and
+config copy:
+
+```
+root INFO /tmp/... -> 10.241.144.2:/etc/corosync/corosync.conf
+root INFO /tmp/... -> 10.241.144.3:/etc/corosync/corosync.conf
+root INFO /tmp/... -> 10.241.144.4:/etc/corosync/corosync.conf
+root DEBUG [root@10.241.144.2]: systemctl stop pacemaker
+root DEBUG [root@10.241.144.2]: systemctl restart corosync
+root DEBUG [root@10.241.144.2]: systemctl start pacemaker
+root DEBUG [root@10.241.144.2]: crm status | grep -qs "Online: \["; echo $?
+```
+
+If the workflow is manually cancelled much later, GitHub reports `maas` as `cancelled` rather
+than a normal FCE exception.
+
+**Root cause:** Pacemaker/Corosync auto-starts on all three infra nodes as soon as packages are
+installed, before FCE has copied the final `/etc/corosync/corosync.conf`. Peer nodes can start
+with the default localhost-only Corosync configuration (`local addr: 127.0.0.1`, one-member
+partition). FCE then copies the intended multi-node config to all nodes but restarts
+Corosync/Pacemaker only on node1. Node1 restarts with the correct 10.241.x member list, but the
+peers keep running their old localhost-only partitions. The HA cluster never forms quorum,
+`crm status` never shows an `Online: [` cluster, and FCE can hang indefinitely because this poll
+path has no effective timeout.
+
+**Evidence to look for:**
+
+```bash
+# FCE stops after restarting HA only on node1
+grep "corosync.conf\|systemctl .*pacemaker\|systemctl restart corosync\|crm status" \
+  <work_dir>/<uuid>/generated/maas/log.txt
+
+# Peer nodes started before the final config copy, with localhost-only Corosync
+journalctl --file <peer>/var/log/journal/*/system.journal \
+  | grep -E "Configured link number 0: local addr: 127.0.0.1|Members\[1\]: 1"
+
+# Node1 restarted after config copy, but still formed a one-node membership and no quorum
+journalctl --file <node1>/var/log/journal/*/system.journal \
+  | grep -E "adding new UDPU member|Sync members\[1\]|No quorum|lack of quorum"
+```
+
+**Recommendation:** Disable Corosync/Pacemaker auto-start until after the final config is
+present, or restart Corosync/Pacemaker on all infra nodes after copying `corosync.conf`. Add a
+bounded timeout around the `crm status` poll and dump cluster membership diagnostics when HA
+does not become online.
+
+**From run:** 36148497587 (UUID `eb160cb4-9175-41e2-aa53-dc65b4e0ffbf`,
+tor3-sqa-dedicated_maas dh1_j6, branch main, 2026-09-25). Peers `mienfoo` and `swoobat` started
+with localhost-only Corosync at 15:00:52/53; `leafeon` was the only node restarted after config
+copy and remained alone with no quorum until manual cancellation ~44 hours later.
+
+### Pattern 28: Runner egress proxy handles private MAAS VIP request → Squid `ERR_CONNECT_FAIL` → tag update exits 2
+
+**Symptom (FCE `generated/maas/log.txt` / runner log):** the maas layer fails in
+`maas:configure_maas` while configuring MAAS tags:
+
+```
+root DEBUG [localhost]: maas root tags create name=foundation-nodes kernel_opts=intel_iommu=off
+root DEBUG [localhost]: maas root tag update foundation-nodes kernel_opts=intel_iommu=off
+root ERROR [localhost] Command failed: maas root tag update foundation-nodes kernel_opts=intel_iommu=off
+...
+<body id=ERR_CONNECT_FAIL>
+Connection to <maas-vip> failed. (110) Connection timed out
+Generated ... by prod-internal-egress-proxy-... (squid/5.9)
+subprocess.CalledProcessError: Command '['maas', 'root', 'tag', 'update', ...]' returned non-zero exit status 2.
+```
+
+**Root cause:** FCE invokes the local `maas` CLI as a plain subprocess, so it inherits the CI
+runner's proxy environment. If the internal MAAS VIP is not covered by `no_proxy`, a private
+MAAS API request can be routed through the corporate egress Squid proxy. The proxy cannot reach
+the RFC1918 MAAS VIP and returns `ERR_CONNECT_FAIL` after its connect timeout. FCE has no retry
+around `update_tag()`, so one proxy timeout aborts the whole maas layer even though MAAS itself
+may be healthy.
+
+**Evidence to look for:**
+
+```bash
+# Failing command and proxy-generated error page
+grep -n "tag update foundation-nodes\|ERR_CONNECT_FAIL\|egress-proxy\|Connection to .* failed" \
+  files/<UUID>/generated/maas/log.txt
+
+# Server-side access log: preceding tag create reaches MAAS, but failed tag update often does not
+grep "15:01\\|15:02" <work_dir>/maas-logs/<region-ip>/var/log/maas/http/access.log \
+  | grep "/MAAS/api/2.0/tags"
+
+# Confirm MAAS API kept serving other requests during the timeout window
+grep "15:02" <work_dir>/maas-logs/<region-ip>/var/log/maas/http/access.log | head
+```
+
+**Distinguishing evidence:**
+- The error HTML footer names an external/internal egress Squid host, not MAAS HAProxy.
+- The MAAS access log has no corresponding failed `PUT /MAAS/api/2.0/tags/<tag>/` request,
+  while other MAAS API/RPC requests continue to return 200 in the same window.
+- Pacemaker/HAProxy/regiond logs show no API VIP move or MAAS outage at the failure time.
+
+**Recommendation:** Ensure `no_proxy` covers the MAAS VIP/lab subnets for all FCE `maas` CLI
+calls, or strip proxy variables in `maas_cli.local()` when the profile URL points at a private
+MAAS endpoint. Add bounded retry for transient proxy/connect timeouts around idempotent tag
+update operations.
+
+**From run:** 36143354423 (UUID `a154b97a-585e-4113-b472-0e2ca84759c7`,
+tor3-sqa-dedicated_maas dh1_j2, branch main, 2026-09-25).

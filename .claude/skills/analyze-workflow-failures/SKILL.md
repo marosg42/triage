@@ -13,6 +13,11 @@ its logs (including from Swift object storage), and determine the root cause of 
 > The goal is purely **diagnosis** — understanding *why* it failed — not remediation.
 > All evidence must come from GitHub Actions logs and Swift-stored artifacts.
 
+Every analysis then ends with a **mandatory cross-check against happy-bot** (Step 8) — an
+independent triage of the same run performed while the environment was still live. happy-bot's
+files are quarantined until your own root cause is written, so the two analyses stay
+independent and the comparison is meaningful.
+
 ## Knowledge Base Structure
 
 This skill is split across files to keep context lean. Only load what you need:
@@ -22,13 +27,16 @@ This skill is split across files to keep context lean. Only load what you need:
 ├── SKILL.md                        ← you are here (core process)
 ├── steps/
 │   ├── _template.md                                    ← template for new step files
+│   ├── canonicalk8s_maas.md                            ← per-step logs, patterns, grep hints
 │   ├── canonicalk8s_openstack.md                       ← per-step logs, patterns, grep hints
+│   ├── canonicalk8s_test.md                            ← per-step logs, patterns, grep hints
 │   ├── existing_juju_maas_controller_microk8s.md       ← per-step logs, patterns, grep hints
 │   ├── juju_k8s_controller.md                          ← per-step logs, patterns, grep hints
 │   ├── juju_kubernetes_controller.md                   ← per-step logs, patterns, grep hints
 │   ├── juju_maas_controller.md                         ← per-step logs, patterns, grep hints
 │   ├── k8s_cloud.md                                    ← per-step logs, patterns, grep hints
 │   ├── juju_openstack_controller.md                    ← per-step logs, patterns, grep hints                         ← per-step logs, patterns, grep hints
+│   ├── sunbeam_configure.md                            ← per-step logs, patterns, grep hints
 │   ├── maas.md                                         ← per-step logs, patterns, grep hints
 │   ├── magpie.md                                       ← per-step logs, patterns, grep hints
 │   ├── metallb_microk8s.md                             ← per-step logs, patterns, grep hints
@@ -36,17 +44,21 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── sunbeam_deploy.md                               ← per-step logs, patterns, grep hints
 │   ├── sunbeam_maas_deploy.md                          ← per-step logs, patterns, grep hints
 │   ├── sunbeam_prepare_env.md                          ← per-step logs, patterns, grep hints
+│   ├── sunbeam_refresh_sunbeam.md                      ← per-step logs, patterns, grep hints
 │   ├── sunbeam_test_with_validation_plugin.md               ← per-step logs, patterns, grep hints
 │   ├── sunbeam_test_with_validation_plugin_no_features.md  ← per-step logs, patterns, grep hints (log-finding guidance applies to ALL sunbeam_test_with_validation_plugin_* variants)
 │   ├── sunbeam_launch_vm.md                               ← per-step logs, patterns, grep hints
 │   ├── juju_sunbeam_controller.md                         ← per-step logs, patterns, grep hints
 │   ├── landscape.md                                    ← per-step logs, patterns, grep hints
+│   ├── deploy_charm_mongodb.md                         ← per-step logs, patterns, grep hints
 │   ├── deploy_charm_mysql.md                           ← per-step logs, patterns, grep hints
 │   ├── deploy_charm_mysql_k8s.md                       ← per-step logs, patterns, grep hints
 │   ├── deploy_charm_postgresql.md                      ← per-step logs, patterns, grep hints
 │   ├── openstack.md                                    ← per-step logs, patterns, grep hints
 │   ├── prepare_shared_maas_clusters_for_deployment.md ← per-step logs, patterns, grep hints
 │   ├── redeploy_dedicated_maas_infra_nodes.md        ← per-step logs, patterns, grep hints
+│   ├── sunbeam_enable_telemetry.md                     ← per-step logs, patterns, grep hints
+│   ├── sunbeam_enable_loadbalancer-amphora.md          ← per-step logs, patterns, grep hints
 │   ├── setup_virtual_lab.md                           ← per-step logs, patterns, grep hints
 │   ├── test_kubeflow.md                               ← per-step logs, patterns, grep hints
 │   ├── kubernetes-maas.md                             ← per-step logs, patterns, grep hints
@@ -75,6 +87,7 @@ If no file exists yet, use `steps/_template.md` as a guide and create one after 
 |---|---|
 | **GitHub Run ID** | The numeric ID of a GitHub Actions workflow run (e.g., `23388633087`). Obtained from `jobs.json` in Swift; used with `gh run view`. |
 | **Solutions Run UUID** | A UUID (e.g., `63cd57c4-cba2-48a7-95e9-fb01ae0600cb`) generated per pipeline execution, used to identify the run in Weebl and as the Swift object storage prefix for collected logs. |
+| **happy-bot** | Another bot that triages the run **while the environment is still live**. Its output lands in `files/<UUID>/generated/happy-bot/`. Used **only** for the mandatory cross-check in Step 8 — never as an input to your own analysis. |
 
 ## Source Repositories
 
@@ -97,6 +110,11 @@ local checkouts above.
 > Do NOT use GitHub MCP server tools (`github-mcp-server-*`) for any step in this skill —
 > they will not work for this repository. All GitHub Actions log retrieval must go through
 > the `gh` CLI (Steps 1–3).
+
+> **⚠️ happy-bot quarantine.**
+> `files/<UUID>/generated/happy-bot/` holds an independent triage of the same run. It is
+> **off-limits during Steps 1–7** and **mandatory in Step 8**. Reach your own root cause
+> from the raw logs first, write it down, and only then open happy-bot's files to compare.
 
 ### On Entry: Check for Existing Analysis First
 
@@ -279,6 +297,11 @@ files/<UUID>/
 │   ├── github-runner/
 │   │   ├── jobs.json              — GitHub API job metadata (run_id, steps, conclusions)
 │   │   └── run.log                — full runner log
+│   ├── happy-bot/                 — ⛔ QUARANTINED until Step 8 (see below)
+│   │   ├── report.md              — another bot's triage report, written from the LIVE env
+│   │   ├── findings.md
+│   │   ├── improvements.md
+│   │   └── bug_report.txt
 │   ├── maas/
 │   │   ├── log.txt                — short FCE build log for the MAAS layer
 │   │   ├── logs-<timestamp>.tgz   — full MAAS infrastructure logs archive
@@ -288,6 +311,10 @@ files/<UUID>/
 ```
 
 #### 4a. Quick triage from local files
+
+> **⛔ `generated/happy-bot/` is off-limits during Steps 4–7.**
+> See "Rule: happy-bot quarantine" below. Do not read, `grep`, `cat` or reference it until
+> your own root cause is written down.
 
 ```bash
 # Tail of all log streams:
@@ -427,11 +454,78 @@ From the logs, extract:
 6. **Check AppArmor denials**: `DENIED` entries in syslog can indicate hook failures, but **beware of false positives**.
    - *Note: AppArmor `DENIED` messages (e.g., for `/etc/gss/mech.d/`) are often benign probes by underlying libraries (like `psycopg2` checking for Kerberos auth) that gracefully fall back. Do not assume an AppArmor denial is the root cause without corroborating evidence. Always look for underlying exceptions, database concurrency issues, or serialization failures first.*
 
+---
+
+### 8. Compare Against happy-bot (MANDATORY)
+
+**Do this for every analysis, without being asked**, provided
+`files/<UUID>/generated/happy-bot/` exists. If the directory is absent, state that in the
+report and skip the section.
+
+#### Rule: happy-bot quarantine
+
+`generated/happy-bot/` contains an independent triage produced by another bot **while the
+environment was still live**. Its value is entirely as a *cross-check*, and that value is
+destroyed if you read it first — you will anchor on its conclusions instead of finding your
+own.
+
+| Phase | happy-bot access |
+|---|---|
+| Steps 1–7 (evidence gathering, root cause) | ⛔ **Forbidden.** Never read, `grep`, `cat`, `view`, `find`-into or cite it. Exclude it from any recursive search (`--exclude-dir=happy-bot`). |
+| Step 8 (comparison) | ✅ Required. |
+
+If you delegate analysis to subagents, **explicitly forbid happy-bot access in their prompt**
+and do the comparison yourself in the parent context.
+
+Your own root cause must be committed to writing (Step 7 complete) *before* you open any
+happy-bot file. Do not retro-fit your conclusion to match theirs.
+
+#### What to read
+
+```bash
+cat files/<UUID>/generated/happy-bot/report.md        # their triage + evidence chain
+cat files/<UUID>/generated/happy-bot/findings.md      # supporting observations
+cat files/<UUID>/generated/happy-bot/bug_report.txt   # draft upstream bug, if any
+cat files/<UUID>/generated/happy-bot/improvements.md  # suggested pipeline changes
+```
+
+#### How to compare
+
+1. **Classify the agreement** on the failed step, the failing component, and the root cause:
+   `Agree` / `Partially agree` / `Disagree`.
+2. **Verify every contested factual claim yourself** against the raw logs — do not simply
+   defer to happy-bot, and do not simply defend your own report. Quote counts, timestamps
+   and log lines. Common real discrepancies:
+   - Reversed or mismatched IPs/MACs/hostnames in an evidence chain.
+   - A signature happy-bot ruled out that *is* present in the archive (or vice versa).
+   - Claims about "no traffic"/"no errors" that are artefacts of a bad grep.
+3. **Account for the asymmetry of evidence**:
+   - **happy-bot had live access** (`virsh`, `kubectl`/k8s API, `maas` CLI, `juju` on the
+     running model, pod events, hypervisor stats). For anything not captured in the bundle —
+     image-pull durations, vCPU freeze, pod events, live DHCP config — happy-bot is usually
+     the stronger source and you cannot refute it from the archive alone.
+   - **You have the full archive** (complete rack syslogs, the `logs-*.tgz`, full runner
+     logs, `sshtest.txt`), which happy-bot often sampled only partially, and you have the
+     `steps/` + `patterns/` knowledge base. For anything in the archive, your check wins over
+     an unsupported live-env assertion.
+   - When the two sources genuinely cannot be reconciled, say so and state what evidence
+     would settle it.
+4. **Update your own report** if happy-bot is right — correct the conclusion, do not merely
+   append a footnote contradicting your own summary.
+5. **Note gaps in both directions**: findings happy-bot has that you missed, and findings you
+   have that happy-bot missed (e.g. a matching entry in `patterns/`, or a known upstream bug).
+
+> **Common `grep` trap:** some `var/log/syslog` files are detected as binary, and plain
+> `grep` silently skips them with `Binary file ... matches`. **Always use `grep -a`** on
+> MAAS syslogs. Several "there was no traffic at all" conclusions have been wrong for exactly
+> this reason.
+
 ## Output Format
 
 **Scope rules — follow strictly:**
 - Analyse **only the run provided**. Do NOT reference, compare, or draw connections to other runs unless the user explicitly asks.
 - Each run is treated as independent. Do not mention that a "similar" issue occurred elsewhere, or suggest substrate-wide patterns based on multiple runs in the same session.
+- The exception is the **Comparison with happy-bot** section, which compares two analyses *of this same run* and is always required when the happy-bot directory is present.
 - The "Notable Context" section is **not part of the output template** — omit it entirely.
 
 ```markdown
@@ -495,7 +589,40 @@ Stack Trace:
 
 1. <Infrastructure/config change that would prevent recurrence>
 2. <Code change that would improve resilience or error messaging>
+
+---
+
+## Comparison with happy-bot
+
+> Mandatory whenever `generated/happy-bot/` exists. If it is absent, write
+> "No happy-bot analysis present in this bundle." and omit the rest of this section.
+
+**Verdict:** ✅ Agree / 🟡 Partially agree / ❌ Disagree
+
+| Aspect | happy-bot | This analysis | Assessment |
+|---|---|---|---|
+| Failed step | <...> | <...> | <match / mismatch> |
+| Failing component | <...> | <...> | <...> |
+| Root cause | <...> | <...> | <...> |
+
+**Points of agreement**
+- <...>
+
+**Discrepancies (each verified against the raw logs)**
+- <claim> — happy-bot says X; the archive shows Y (`<log line / counts / timestamps>`).
+  Conclusion: <who is right, and why>.
+
+**Findings only happy-bot had** (typically live-env data: pod events, `virsh` stats, live
+DHCP config, MAAS/Juju CLI output)
+- <...>
+
+**Findings only this analysis had** (typically full-archive data, `steps/`/`patterns/`
+knowledge, known upstream bugs)
+- <...>
+
+**Unresolved:** <what evidence would be needed to settle any remaining conflict, or "none">
 ```
+
 
 ---
 
@@ -526,6 +653,8 @@ use `outputs/<run_id>-analysis.md` as a fallback.
 - **Filter noise**: Exclude `***` (masked secrets), `#011` (continuation lines), `twisted`/`django` framework internals
 - **Follow timestamps**: Logs are chronological, correlate events by time
 - **Check all nodes**: The tgz archive contains logs from all infra nodes — the failing node may not be obvious
+- **Use `grep -a` on MAAS syslogs**: some `var/log/syslog` files are classified as binary and plain `grep` skips them silently — always pass `-a`, and check *both* rack controllers before concluding "no traffic"
+- **Exclude happy-bot from searches**: add `--exclude-dir=happy-bot` to any recursive grep over `files/<UUID>/` during Steps 1–7
 
 ### Snap Refresh Investigation
 - Always check if a snap auto-refresh occurred during or just before the failure window
@@ -546,6 +675,7 @@ use `outputs/<run_id>-analysis.md` as a fallback.
 - **Bundle size**: The full UUID bundle can be 50–100 MB — `download_uuid.sh` (launched as background subagent) handles this efficiently
 - **Domain knowledge**: Some errors require specific MAAS/Juju/Sunbeam product knowledge
 - **Diagnosis only**: This skill identifies root causes. The failing infrastructure is gone — no fix can be applied retroactively. Findings should be used to inform future preventive action.
+- **Post-mortem blind spots**: the archive cannot show live-only data (pod events and image-pull durations, hypervisor/`virsh` guest state, live `dhcpd.conf`, MAAS/Juju CLI output). happy-bot's report (Step 8) may legitimately contain evidence you cannot reproduce or refute — weigh it accordingly instead of dismissing it.
 
 ## Related Skills
 
@@ -567,4 +697,3 @@ existing pattern, update the knowledge base so future analyses benefit:
 3. Update the Knowledge Base Structure section in this file to list the new step file
 
 The user will review with `git diff` and commit when satisfied.
-

@@ -325,6 +325,85 @@ OpenStack validation failure.
 2. Add retry/reconnect logic around `run_remote_command()` when SSH exits 255 on `virtual_maas`
 3. Persist validation logs directly on the runner as each profile finishes so a later tunnel loss does not hide refstack results
 
+### Pattern 5: tempest-k8s Workload Image Missing `cron`
+
+**Symptom:** The step fails before any `sunbeam validation run quick/smoke/refstack` logs are
+created. `sunbeam enable validation` runs for exactly 3600 seconds and exits non-zero:
+
+```text
+Timed out enabling validation: TimeoutError('wait timed out after 3599.999...s')
+```
+
+The embedded or collected Juju status shows `tempest` / `tempest/0` blocked:
+
+```text
+(workload) Error in charm (see logs): cannot perform the following tasks:
+- Start service "tempest" (cannot start service: fork/exec /usr/sbin/cron: no such file or directory)
+```
+
+**Root cause:** The `tempest-k8s` charm defines a Pebble service named `tempest` with command
+`cron -f` to run periodic checks, but the published tempest workload image does not contain
+`/usr/sbin/cron`. Pebble cannot start the service, the `tempest-pebble-ready`/bootstrap path
+raises `ops.pebble.ChangeError`, and the application never reaches `active`, so Sunbeam's
+enable-validation wait times out.
+
+**Evidence to look for:**
+- `generated/sunbeam/output.log`: `ssh ... sunbeam enable validation`, followed one hour later
+  by `Timed out enabling validation` and a blocked `tempest` status with missing
+  `/usr/sbin/cron`.
+- `generated/sunbeam/juju_status_openstack.txt`: all other OpenStack apps active/idle while
+  `tempest` is `blocked`.
+- `generated/sunbeam/pods_openstack_logs.tgz`: extract `logs-openstack-tempest-0.txt` and
+  check for:
+  ```text
+  Service "tempest" starting: cron -f
+  Change ... failed: cannot start service: fork/exec /usr/sbin/cron: no such file or directory
+  ops.pebble.ChangeError
+  ```
+- `generated/sunbeam/kubectl_get_pod_detailed.txt`: confirms the `tempest` payload image digest
+  if needed.
+- Absence of `validation_*.log` and `latest_validation.log` is expected because the validation
+  feature never finished enabling.
+
+**Fix candidates:**
+1. Publish a fixed `tempest-k8s` workload image that includes the `cron` package.
+2. Change the charm to avoid adding/starting the cron Pebble service when no schedule is
+   configured.
+3. Pin the pipeline to a known-good tempest-k8s charm/image revision until the channel is fixed.
+
+### Pattern 6: Shared MAAS SSH ServerAlive Timeout After Passing Validation
+
+**Symptom:** `quick`, `smoke`, and often `refstack` validation logs all show `Failed: 0`, but
+the step fails while the runner is executing `sunbeam validation run refstack` over SSH:
+
+```text
+Timeout, server <bootstrap-node>.maas not responding.
+subprocess.CalledProcessError: Command '['ssh', ... 'sunbeam', 'validation', 'run',
+'refstack', ...]' returned non-zero exit status 255.
+```
+
+**Root cause:** The OpenSSH transport from the GitHub runner to the Sunbeam bootstrap node
+stops receiving keepalive responses. The workflow uses `ServerAliveInterval=60` and
+`ServerAliveCountMax=10`, so the client terminates the session after roughly 10 minutes of
+unanswered keepalives. On shared MAAS this can be a transient runner-to-lab transport issue
+even when the remote validation command continues and completes successfully on the node.
+
+**Evidence to look for:**
+- `generated/sunbeam/output.log`: refstack SSH command starts, then fails about 10 minutes
+  later with `Timeout, server ... not responding` and exit status 255.
+- `generated/sunbeam/validation_quick_*.log`, `validation_smoke_*.log`, and
+  `validation_refstack_*.log`: all contain `Failed: 0`.
+- `generated/sunbeam/juju_status_openstack.txt` and `kubectl_get_pod.txt`: OpenStack model
+  and pods are healthy after the failure.
+- Bootstrap-node sos/auth logs, when collected: SSH session opens for the refstack command and
+  later SSH connections succeed, showing the node did not reboot or stay unreachable.
+
+**Fix candidates:**
+1. Retry or reconnect on SSH exit 255, then inspect the node-side validation log before failing.
+2. Increase or tune SSH keepalive settings for long validation profiles.
+3. Emit periodic progress from long remote validation commands so transport issues are easier
+   to distinguish from validation failures.
+
 ---
 
 _Add more patterns below as they are discovered._
@@ -339,4 +418,3 @@ _Add more patterns below as they are discovered._
   passes but smoke fails, the data plane is the suspect (VMs/networking), not the API layer
 - The guidance in this file applies to all `sunbeam_test_with_validation_plugin_*` step
   variants — the log layout and validation log naming scheme are identical across them
-

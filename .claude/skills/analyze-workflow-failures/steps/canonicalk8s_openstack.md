@@ -129,13 +129,148 @@ _Observed in: run 30246045059 / UUID `fa380aa5-8be2-4310-99f2-52eff5d8a639` (sub
 
 ---
 
+### Pattern 3: terraform-provider-juju `juju_application` create never returns → 4h `timeout` kill (exit 124)
+
+**Symptom:**
+```
+module.k8s.juju_application.k8s: Still creating... [239m52s elapsed]
+module.k8s_worker["k8s-worker"].juju_application.k8s_worker: Still creating... [239m52s elapsed]
+Interrupt received. / Stopping operation...
+│ Error: Plugin did not respond      (or: │ Error: operation canceled)
+##[error]Process completed with exit code 124
+##[end-action id=…deploy_solution.apply;outcome=failure;duration_ms=14400263]
+```
+`duration_ms=14400263` (exactly 240m) + exit **124** ⇒ the `timeout 4h` wrapper around
+`terraform apply` fired; it is **not** a provider or Juju timeout.
+
+**Root cause:** the provider's post-deploy read (`ReadApplicationWithRetryOnNotFound`) is a
+`retry.Call{Attempts: 30, Delay: 1s, BackoffFunc: DoubleDelay}` with **no MaxDelay/MaxDuration**
+and no user-visible logging. If its readiness predicate is never satisfied, Create silently
+retries with doubling delays (worst case ~2^30 s). The Juju deploy itself succeeds: the model,
+all machines, charms and unit agents come up within minutes. Because `juju_application` Create
+never returns, **no downstream resource is ever attempted** — the
+`k8s:cluster ↔ k8s-worker:cluster` integration and the whole `module.openstack`
+(openstack-integrator, cinder-csi, openstack-cloud-controller) are never created, so
+`k8s-worker` units sit in `blocked: Missing cluster integration` for the whole window. That
+blocked state is a **consequence**, not the cause.
+
+**Evidence to look for:**
+- `run.log`: only `Still creating...` for `juju_application.k8s` / `.k8s_worker` up to ~`239m5Xs`,
+  then interrupt + exit 124. No `Creation complete` for either app.
+- **Controller audit log is the decisive artifact.** Extract from the
+  `juju_openstack_controller` crashdump and filter to the provider's conversations:
+  ```bash
+  tar xzf files/<uuid>/generated/juju_openstack_controller/juju-crashdump-controller-*.tar.gz \
+      -C /tmp/cd --wildcards '*/var/log/juju/audit.log' '*/var/log/juju/logsink.log' \
+                 '*/var/log/juju/models/*'
+  python3 -c "
+  import json,glob
+  conv={};rows=[]
+  for f in glob.glob('/tmp/cd/*/*/baremetal/var/log/juju/audit.log'):
+    for line in open(f):
+      try: d=json.loads(line)
+      except: continue
+      if 'conversation' in d: conv[d['conversation']['conversation-id']]=d['conversation'].get('what','')
+      if 'request' in d:
+        r=d['request']
+        if 'terraform' in conv.get(r['conversation-id'],''): rows.append((r['when'],r['facade'],r['method']))
+  for r in sorted(rows): print(*r)"
+  ```
+  Expect: `ModelManager.CreateModel`, 2× `Application.DeployFromRepository`, then repeating
+  triples of `Application.ApplicationsInfo` + `Application.Get` + `Client.FullStatus`,
+  **14 attempts per app**, with gaps doubling 1s → 2s → … → 34m → **68m**, and
+  `errors: [null]` on every request (no API-level failure ⇒ provider-side predicate failure).
+- The last ~1h43m before the kill has **no provider traffic at all**. This is the backoff
+  sleeping (attempt 15 is due 136 min after attempt 14), *not* a stalled RPC — do not
+  misreport it as a hang.
+- Model log `generated/…/var/log/juju/models/admin-canonicalk8s-openstack-*.log` stops a few
+  minutes after provisioning finishes and stays silent for the rest of the run.
+- `logsink.log` (controller machine-0) is the only source of unit-level logs — the
+  canonicalk8s model is **not** crashdumped. Filter by model uuid prefix:
+  `grep -ah "^<modeluuid>" */baremetal/var/log/juju/logsink.log | grep -a "Status context closed with: \[[A-Z]"`
+
+**Distinguishing factor to check:** `k8s` and `k8s-worker` are the only applications pinned to
+base `ubuntu@26.04` / channel `1.36/candidate` in `config/manifest_canonicalk8s_openstack.yaml`;
+every other planned app is `ubuntu@22.04` and is never attempted. Unconfirmed but worth an A/B
+against `ubuntu@24.04`.
+
+**Fix directions:** capture `TF_LOG_PROVIDER=DEBUG` on the apply (the bundle currently contains
+nothing about *why* the provider retries); add `timeouts { create = … }` to `juju_application`;
+upgrade past terraform-provider-juju 0.23.3.
+
+_Observed in: runs 33527877332 / `c4601c94-764d-4aee-85f4-2a854c4c09e7`,
+33686835617 / `17ba6020-5c2a-4c51-80e4-0c93548b95ee`,
+33713186585 / `41d68b33-c37b-4063-ba39-85f24c3927cc` (all substrate `ext-sqa-ps6_openstack`)._
+
+---
+
+### Pattern 4: `terraform init` fails in <10s — `Unsupported argument: model` from unpinned `?ref=main` charm modules
+
+**Symptom:**
+```
+Downloading git::https://github.com/charmed-kubernetes/charm-aws-integrator?ref=main for aws.aws_integrator...
+...
+│ Error: Unsupported argument
+│   on aws/applications.tf line 40, in module "aws_integrator":
+│   40:   model       = var.model
+│ An argument named "model" is not expected here.
+(×4: aws_integrator, aws_k8s_storage, aws_cloud_provider, ceph_csi)
+##[error]Process completed with exit code 1.
+##[end-action id=…deploy_solution.init;outcome=failure;duration_ms=9762]
+##[end-action id=…deploy_solution.tf-validate;outcome=skipped]
+```
+
+**Root cause:** `k8s-bundles@release-1.35` pins most charm terraform modules
+(`k8s-operator?ref=release-1.35`, `openstack_*?ref=release_1.34`,
+`ceph-charms?ref=stable/squid-jammy`) but pulls **four modules at the floating `?ref=main`**:
+`charm-aws-integrator`, `aws-k8s-storage`, `charm-aws-cloud-provider`, `ceph-csi-operator`.
+Those `main` branches made a breaking change to their variable interface (dropped/renamed
+`model`), while the release-1.35 caller still passes `model = var.model`.
+
+Terraform type-checks **every module block in the root configuration tree at init**, so the
+`aws/` and `ceph/` configs break the run even though `cloud_integration = "openstack"` means
+they are never instantiated. Nothing is deployed — no model, no machines.
+
+**Evidence to look for:**
+- The set of erroring modules maps **1:1 onto the `?ref=main` downloads** in the init log; no
+  pinned module errors. Grep the init section for `?ref=` to build the pinned/unpinned map.
+- `duration_ms` ≈ 10 000 on `deploy_solution.init` and `tf-validate;outcome=skipped` — the
+  failure is at *init*, not plan/apply.
+- `generated/version_collector_canonicalk8s_openstack.log` contains only controller-state
+  collection; there is no deploy activity at all for the step.
+- Beware: happy-bot may mis-attribute this step to earlier tempest failures. Check
+  `LAYERS_TO_BUILD` for `IGNORE_TEMPEST_FAILURE: true` and the step conclusions in
+  `jobs.json` — validation failures in `sunbeam_test_with_validation_plugin` can be
+  deliberately ignored and are unrelated.
+
+**Fix directions:** pin the four `?ref=main` module sources to a release branch/tag in
+k8s-bundles; add a `terraform init -backend=false && terraform validate` pre-flight so
+interface drift is caught in seconds instead of after a 7-hour Sunbeam deploy.
+
+_Observed in: run 36023061228 / UUID `d5ababe6-6e80-4866-8cc2-dc1860234634`
+(substrate `tor3-sqa-testflinger`, branch `release-1.35`); run 36023039991 / UUID
+`aa78fbde-a12a-4788-b2f0-6b44e1b122d4` (substrate `tor3-sqa-testflinger`, workflow
+branch `main`, k8s-bundles branch `release-1.35`); run 36029770355 / UUID
+`4c47da04-e4d7-407f-8072-dae811dac93d` (substrate `tor3-sqa-shared_maas`,
+workflow branch `main`, k8s-bundles branch `release-1.35`)._
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes
 
-- **Two distinct failure timings:** Pattern 1 fails **fast** at model creation (`terraform apply`
-  ~30s in); Pattern 2 fails **slow** after a full 60-minute `juju wait-for` timeout. Check the
-  timestamp gap between step start and the error to tell them apart quickly.
+- **Substrate note:** `ext-sqa-ps6_openstack` (Canonical PS6 tenant) is also common for this
+  step, alongside `shared_maas`/`testflinger`. In that case there is no `generated/sunbeam/`
+  directory at all — the OpenStack layer artifacts live under `generated/openstack/` and the
+  Juju controller artifacts (crashdump, dump-db, image streams) under
+  `generated/juju_openstack_controller/`.
+- **Three distinct failure timings:** Pattern 1 fails **fast** at model creation
+  (`terraform apply` ~30s in); Pattern 2 fails **slow** after a full 60-minute `juju wait-for`
+  timeout; Pattern 3 fails after exactly **240 minutes** with exit code 124 and both
+  `juju_application` resources still `Still creating...`; Pattern 4 fails in **<10 seconds** at
+  `terraform init` with exit code 1 and `tf-validate` skipped. Check the elapsed time and the
+  exit code first — they identify the pattern immediately.
 - **VIP map (typical):** `traefik-public` → keystone **public** VIP (used by the credential
   `auth_url`); `traefik` → keystone **internal** VIP; `traefik-rgw` → RGW. Get the live mapping
   from `juju_status_openstack.txt` (`Serving at https://…`).

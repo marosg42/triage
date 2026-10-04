@@ -178,3 +178,87 @@ fine and **cloud-init succeeded** (`Datasource DataSourceOpenStackLocal [net,ver
 - Run 30196037796 / UUID `4f55d457-b9f9-4887-a8b6-31f0233d8064`: speakers silent from 20:46:03,
   failure at 21:09:35 (`dial tcp 10.241.38.134:443: i/o timeout`); openstack pods logged to
   21:45–21:48.
+
+---
+
+### Pattern 4: traefik-k8s upgrade leaves one internal traefik replica without a certificate → intermittent Nova HTTP 500
+
+> **Distinct from Patterns 1 and 3.** Those produce a network-level `i/o timeout` from the
+> bootstrap VM. This one produces an **HTTP 500 from the Nova API**, with
+> `keystoneauth1.exceptions.connection.SSLError` named in the fault payload. If you see
+> `returned unexpected status: 500` rather than `i/o timeout`, go straight here.
+
+**Symptom:**
+```
+null_resource.juju_controller (local-exec): ERROR failed to bootstrap model:
+  cannot start bootstrap instance: cannot run instance:
+  request (https://<public-VIP>:443/openstack-nova/v2.1/servers[/<id>])
+  returned unexpected status: 500; error info:
+  {"computeFault": {"code": 500, "message": "Unexpected API Error. ...
+   <class 'keystoneauth1.exceptions.connection.SSLError'>"}}
+```
+Inside nova-api:
+```
+ERROR nova.api.openstack Caught error: SSL exception connecting to
+  https://<internal-VIP>/openstack-keystone/v3/auth/tokens: ...
+  (Caused by SSLError(SSLCertVerificationError(1,
+    '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate')))
+```
+
+**Root cause:** The `sunbeam_upgrade_traefik_k8s` step recreates the **internal** `traefik`
+StatefulSet. Unit `traefik/0` comes back with its private-key secret gone; the charm then
+discards its CSR (`Removed CSR from relation data because it did not match any certificate
+request`) and **never requests a replacement**. That replica serves traefik's built-in
+`TRAEFIK DEFAULT CERT` (self-signed) for the rest of the run. Because kube-proxy
+round-robins the internal LB IP across all three replicas, roughly **1 in 3** in-cluster
+HTTPS calls to the internal OpenStack API fail certificate verification. nova-api cannot
+validate the caller's token on those connections and returns HTTP 500; `juju bootstrap`
+hits one and fails.
+
+The cloud never self-heals — errors continue until log collection. Juju reports the app
+`active`, so nothing upstream flags the problem.
+
+**Evidence to look for:**
+- `generated/sunbeam/juju_status_openstack.txt` — **the decisive check**:
+  ```
+  traefik/0*  active idle ...  Certificate not available yet
+  traefik/1   active idle ...  Serving at https://<internal-VIP>
+  traefik/2   active idle ...  Serving at https://<internal-VIP>
+  ```
+- `pods_openstack_logs.tgz` → `logs-openstack-traefik-0.txt`: `Private key secret not found,
+  nothing to remove` and `Removed CSR from relation data because it did not match any
+  certificate request`, timestamped at the pod restart inside the upgrade window. These
+  appear on **unit 0 only**.
+- Blast radius: ~30 pods across ceilometer, cinder, designate, glance, gnocchi, heat,
+  neutron, nova, octavia, placement all log `CERTIFICATE_VERIFY_FAILED`.
+- **Timeline discriminator** — bucket the errors by minute:
+  ```bash
+  grep -ah "CERTIFICATE_VERIFY_FAILED" logs-openstack-*.txt \
+    | grep -aoP '^\d{4}-\d\d-\d\dT\d\d:\d' | sort | uniq -c
+  ```
+  Expect a transient burst during `sunbeam_enable_tls`, then a **clean gap** (Tempest
+  validation passes here), then an unbroken run of errors starting at the traefik pod
+  restart. The gap is what proves the upgrade — not enable-TLS — is the trigger.
+
+> **⚠️ Red herring:** `server_cert is None; sending traces over INSECURE connection` appears
+> ~25–29 times on **all three** traefik units and refers to the charm's *tracing* endpoint,
+> not the ingress certificate. It is not a discriminator. Use `Removed CSR` /
+> `Private key secret not found` and the `Certificate not available yet` unit status instead.
+
+**Recommendations:**
+1. Upstream `traefik-k8s` bug: re-request a certificate when the private-key secret is
+   missing after StatefulSet recreation, instead of dropping the CSR and stalling forever.
+2. A unit at `Certificate not available yet` should be `blocked`/`waiting`, not `active`.
+3. Add a post-`sunbeam_upgrade_traefik_k8s` gate asserting every `traefik*` unit message
+   starts with `Serving at`, and/or `openssl s_client` each traefik pod IP and verify the
+   leaf against the cloud CA.
+
+**Observed in:**
+- Run 33207592598 / UUID `14701e8e-b465-487a-9107-88454dc5d1d1`: testflinger cluster_3,
+  branch `main`. traefik/0 restarted 04:45:44; clean error gap 03:44–04:45; errors 04:46 →
+  06:09; failure 05:16:11 on `GET /servers/<id>` (VM created then deleted by Juju).
+- Run 33170527393 / UUID `329df9ba-51f7-49f1-afe5-0b486c0cf28c`: testflinger cluster_2,
+  branch `sunbeam_charm_upgrades`. Upgrade 22:53:40–23:11:19; clean gap 22:2x–22:4x; errors
+  22:5x → 00:0x; failure 23:16:52 on `POST /servers` (no VM ever created).
+
+Same defect on two clusters and two branches — reproducible, not branch-specific.
