@@ -20,6 +20,7 @@ is the first entry in `nodes.yaml`; for cloud substrates the runner connects dir
 | `generated/sunbeam/kubectl_get_pod.txt` | Kubernetes pod state | Pod-level failures |
 | `generated/sunbeam/pods_openstack_logs.tgz` | Per-pod container logs | Nova/Neutron/OVN errors |
 | `generated/version_collector_sunbeam_launch_vm.log` | Snap/apt versions at layer end | Version forensics |
+| `generated/sunbeam/sosreport-<node>-*.tar.xz` | Per-node sosreport: OVN NB/SB DBs + `sos_commands/ovn_central/*list_*`, `ethtool -S`, routes, syslog, Sunbeam CLI logs (`home/ubuntu/snap/openstack/common/logs/`), VM `console.log` under `var/snap/openstack-hypervisor/common/lib/nova/instances/<id>/` | FIP unreachable — gateway chassis, NAT flows, MAC_Binding, guest boot |
 
 ## Key Log Files
 
@@ -109,6 +110,28 @@ gateway lived on the management path, not the provider segment.
 > (`failed to download charm ... archiveSha256 length 0 not valid`) and is a log-capture artifact.
 
 **Confirmed again:** run 26644918393 (UUID f34d99dd-687b-4324-961b-2cdc1ce10bac, tor3-sqa-testflinger cluster_3, branch main, 2026-05-29). In this occurrence, `sunbeam launch` returned `ubuntu@10.242.4.191`, Neutron associated that floating IP to port `ac1bbca9-d65b-4cd3-83e0-f8a32cce0a69`, and Nova recorded `network-vif-plugged` events for instance `7ce0d1b2-ff72-4289-942a-3224c7caf851` on `jasperoid.maas`, yet all 30 SSH probes from bootstrap node `octopot.maas` still failed with `No route to host`.
+
+**Confirmed again (wrong provider NIC on gateway chassis):** run 38951839777 (UUID 2f606a16-bc04-4322-8d02-ece74fa7047b,
+tor3-sqa-testflinger cluster_1, branch less_sshuttle, openstack snap rev 1146, 2026-10-17). FIP `10.242.2.156`,
+VM ACTIVE on `urey.maas` (console shows `test-instance login:`), gateway chassis also `urey.maas`
+(`eth1` = netplan `eno1`, `24:6e:96:47:79:80`). Proven from the sosreports without live access:
+- SB DB has the FIP ARP-responder/DNAT flows and an intact `chassisredirect` cr-lrp → **not Pattern 5**.
+- `sos_commands/ovn_central/*list_MAC_Binding` holds **no** entry for the external gateway (`10.242.2.1`,
+  the router's `Logical_Router_Static_Route` nexthop) even though the VM was up for >10 min doing
+  outbound DNS/NTP via SNAT → no ARP reply ever arrived on the gateway chassis' `eth1`.
+- `ethtool -S eth1`: gateway chassis tx_packets in the thousands vs. tens–hundreds on other
+  network nodes (it keeps ARPing/GARPing unanswered).
+- Bootstrap node has no address on the provider CIDR (`ip_route_show_table_all` → only
+  `default via 10.241.2.1`), so `No route to host` is ICMP host-unreachable from the lab router
+  failing to ARP-resolve the FIP.
+
+- **Actual cause: the wrong NIC was chosen as the provider NIC.** This was confirmed by happy-bot's live tcpdump: the fabric ARP for the FIP arrived on urey `eno4`, never on `eth1`=`eno1`.
+  - In the MAAS-rendered `generated/sunbeam/netplan_urey.maas.yaml`, `eno1` has `dhcp4: true`. The pipeline's `modify_netplans.py` then turned `eno1` into `eth1` in `99-netplan_urey.maas.yaml` and dropped `eno4`.
+  - The real provider port is the **second port of the mgmt NIC card**: urey mgmt `eno3` (`…:84`) → provider `eno4` (`…:85`). The same pattern holds on chespin and claydol (`eno49` → `eno50`) and on peirce (`eno1` → `eno2`).
+  - Check: compare `netplan_<node>.maas.yaml` with `99-netplan_<node>.maas.yaml`, and `lshw-<node>.maas.json` (which shows link and card per port), for the gateway-chassis node.
+
+Quick checks: `grep -A4 "10.242" sosreport-*/sos_commands/ovn_central/*list_MAC_Binding`;
+`grep -B1 -A4 chassisredirect` on the SB data or `*list_Gateway_Chassis` (highest priority = gateway).
 
 ---
 

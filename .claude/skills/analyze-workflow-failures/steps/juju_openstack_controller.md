@@ -219,6 +219,85 @@ tor3-sqa-shared_maas cluster dh1_j8_2, 2026-08-13.
 
 ---
 
+### Pattern 5: `availability zone "nova" not valid` — Nova API DB failures (Sunbeam substrate)
+
+**Symptom:**
+```
+Launching controller instance(s) on openstack_cloud/RegionOne...
+ERROR failed to bootstrap model: cannot start bootstrap instance in availability zone "nova":
+  availability zone "nova" not valid
+```
+Followed by `ERROR controller foundation-openstack not found` and FCE's misleading
+`juju controller is bootstrapped but unreachable.` `enable_ha` never runs.
+
+**Root cause:** The cloud's Nova API is unhealthy (nova-api cannot reach its DB →
+`HTTP 500 oslo_db.exception.DBConnectionError`). Juju enumerates AZs, picks `nova`, then
+re-validates the zone in `StartInstance` with a fresh AZ listing; when that listing comes back
+without `nova` the validator returns the *NotValid* branch ("not valid" = zone missing from the
+list; "is unavailable" would mean listed but down). No VM is ever requested.
+
+**Distinguishing features:**
+- `openstack_bootstrap` fails in ~15 s; ~1 s between `Launching controller instance(s)` and the error.
+- No AZ configured anywhere (`model_defaults.yaml`, bootstrap constraints) — not a config error.
+- **Key evidence is in the GitHub runner log, not log.txt**: the pre-run *Clean existing
+  openstack* step (passes thanks to `|| true`) shows repeated
+  `Unexpected API Error ... <class 'oslo_db.exception.DBConnectionError'> (HTTP 500)` and
+  servers stuck in `BUILD`/`ERROR`; the post-failure *Clean existing openstack* teardown
+  typically fails outright with the same error.
+
+```bash
+grep -n "DBConnectionError\|HTTP 500\|not valid" files/run_<run_id>_failed.log
+```
+
+- The preceding `juju metadata generate-image ... -s ubuntu` → `series "ubuntu" not valid`
+  error is a benign FCE quirk (downgraded to WARNING) — do not mistake it for the cause.
+
+**Variant — `failed to get list of flavour details`:**
+```
+ERROR failed to get list of flavour details: ... .../openstack-nova/v2.1/flavors/detail
+  returned unexpected status: 500 ... DBConnectionError
+```
+Same underlying nova-api ↔ DB failure, hit on the flavor listing instead of the AZ listing.
+Bootstrap fails ~2 s after `Creating Juju controller`; the cleanup then fails on
+`servers/detail`. Failures are intermittent (some nova calls still return 200). FCE's
+`controller not found` / `bootstrapped but unreachable` (`juju_cli.py:149-153`) masks the real
+error. The pre-run *Clean existing openstack* 500s may surface only as `Error: no matches found`,
+so grep `DBConnectionError` in `generated/github-runner/run.log` rather than relying on the
+`HTTP 500` text.
+
+**Substrate health issue** — retrying fails until the Sunbeam control plane (nova-api ↔ MySQL)
+is healthy again.
+
+**From:** run 38568833799, UUID 7bb447b3-2b81-4ac0-ba4c-5a7ef3bfa044, tor3-sqa-sunbeam cluster_4, 2026-10-14.
+**From:** run 38568821147, UUID b03d9996 (flavour-details variant).
+
+---
+
+### Pattern 6: Neutron 500 on security-group tag PUT — `creating tags failed` (Sunbeam substrate)
+
+**Symptom:**
+```
+Launching controller instance(s) on openstack_cloud/RegionOne...
+ERROR failed to bootstrap model: cannot start bootstrap instance: cannot set up groups:
+  creating tags failed, rolled back security group with id: <sg-id>
+caused by: request (https://<host>:443/openstack-neutron/v2.0/security-groups/<sg-id>/tags)
+  returned unexpected status: 500; error info: {"NeutronError": {"type": "HTTPInternalServerError", ... "detail": ""}}
+```
+Followed by FCE's misleading `controller foundation-openstack not found` /
+`bootstrapped but unreachable`. `enable_ha` never runs.
+
+**Root cause:** Server-side Neutron fault on the Sunbeam control plane. The SG POST succeeds,
+the follow-up tag PUT gets a single 500; Juju does not retry, rolls back the SG and aborts.
+
+**Distinguishing features:** ~6 s from `Launching controller instance(s)` to the error; it is
+the only 5xx in the bundle. Pre-run and post-failure *Clean existing openstack* steps list only
+the `default` SG with no 500s/`DBConnectionError` → transient, retry should succeed (unlike
+Pattern 5, where cleanup steps also hit 500s). Neutron server logs are not in the bundle.
+
+**From:** run 38737173099, UUID 47306134-b95a-41f0-8bd3-6dac4078f0b9, tor3-sqa-sunbeam cluster_4, 2026-10-15.
+
+---
+
 ## Notes
 
 - This step is only used on pure-OpenStack substrates (e.g. `ext-sqa-ps6_openstack`). Not present on MAAS-based substrates.

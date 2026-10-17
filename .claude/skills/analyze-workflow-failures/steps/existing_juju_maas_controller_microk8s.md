@@ -81,6 +81,39 @@ error and typically resolves on the next attempt.
 
 ---
 
+### Pattern 2: `http2: client connection lost` during juju add-k8s (server already committed)
+
+**Symptom:**
+```
+ERROR making juju admin credentials in cluster: Post "https://<leader>:16443/api/v1/namespaces/kube-system/secrets": http2: client connection lost
+```
+add-k8s fails ~50 s after starting.
+
+**Root cause:** The client↔API-server HTTP/2 connection stalls *after* the server
+has processed the request. The microk8s crashdump syslog shows the juju POST
+succeeding (`Trace[...] "Create" ... client:<runner egress IP> ... resource:secrets
+... key:/secrets/kube-system/juju-credential-<id>` → `Txn call succeeded <1s`),
+then ~45 s later (client-go HTTP/2 ping timeout: 30 s idle + 15 s) juju's rollback
+`DELETE serviceaccounts` / `DELETE clusterrolebindings` for the same
+`juju-credential-<id>`. kubelite PID unchanged, units active/idle. Not an
+API-server rejection (contrast Pattern 1).
+
+**Evidence to look for:**
+- Extract `generated/microk8s/juju-crashdump-microk8s-*.tar.gz`; in
+  `<model>/0/baremetal/var/log/syslog`: `grep -a "juju-credential-\|user-agent:juju"`.
+- Check max `Txn call` ms only within the add-k8s window — later multi-second
+  spikes (rook-ceph CSI rollout) post-date the failure.
+- A live "no juju secret in kube-system" check does NOT prove the POST never landed —
+  juju deletes it on rollback.
+
+**Substrate observed:** `tor3-sqa-dedicated_maas`, dh1_j2 (2026-10-15), add-k8s ~90 s
+after the microk8s layer's rook-ceph CSI import.
+
+**Recommended action:** Retry; FCE `add_k8s` is single-shot — add retry/backoff on
+transport errors.
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes

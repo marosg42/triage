@@ -357,6 +357,72 @@ coordinated-restart race, not stale state; a re-run usually succeeds.
 
 ---
 
+### Pattern 7: `configure_network` NameResolutionError — runner cannot resolve the MAAS-managed zone
+
+**Symptom (right after `Starting step: openstack:configure_network`):**
+```
+socket.gaierror: [Errno -3] Temporary failure in name resolution
+urllib3.exceptions.NameResolutionError: ... keystone.<cluster>...solutionsqa:5000
+keystoneauth1.exceptions.connection.ConnectFailure: Unable to establish connection to https://keystone.<cluster>...solutionsqa:5000/...
+```
+Five attempts about 20 s apart, then the step fails.
+
+**Root cause:** UDP/53 from the runner network (`10.152.185.0/24`) to MAAS DNS gets no reply,
+while TCP traffic (including Juju) works. MAAS DNS is configured on the runner by the
+*Set DNS* step (`custom-dns.conf`, `maas-dns-servers.conf` drop-ins). This is the first
+runner-side lookup of a cluster FQDN, so earlier layers pass. The cloud and the DNS record are
+fine. This is an environment/network issue.
+
+**Evidence to look for (in the MAAS archive):**
+- `generated/github-runner/run.log`: `maas ... dnsresources create fqdn=keystone...` succeeded.
+- `var/snap/maas/current/bind/zone.<domain>` contains the keystone record.
+- The BIND config has `allow-query { any; }`, `named` is listening on the DNS VIP, and the VIP
+  stayed on one node in pacemaker during the window.
+
+**Fix:** restore UDP/53 from the runner network to MAAS DNS, or add a DNS delegation. Stopgap:
+`/etc/hosts` entries. Pipeline: add a pre-check that resolves the keystone FQDN before
+`configure_network`.
+
+**From run:** 38626738859 (tor3-sqa-dedicated_maas dh1_j2) and 38572507468
+(tor3-sqa-dedicated_maas dh1_j6).
+
+---
+
+### Pattern 8: juju-wait exit 1 on a transient controller-API connection drop (`connection is shutdown before send`)
+
+**Symptom (mid-wait, well before the 14400 s timeout):**
+```
+ERROR:root:ERROR connection is shutdown before send: connection is shut down
+ERROR:root:juju status --format=json failed: 1
+subprocess.CalledProcessError: Command '['juju-wait', '-m', 'foundations-maas:openstack', '-t', '14400', ...]' returned non-zero exit status 1.
+```
+
+**Root cause:** juju-wait's internal `juju status` poll lost its websocket to the controller.
+juju-wait does not retry transport errors (`--retry_errors` covers only hook errors), so one
+dropped connection fails the layer, even while the model is healthy and converging.
+
+**Evidence to look for:**
+- Controller crashdump (`generated/juju_maas_controller/juju-crashdump-controller-*.tar.gz`):
+  grep the rotated `machine-<n>-*.log.gz` files, not only `machine-<n>.log`, which may start
+  after the failure. Look for
+  `error serving RPCs: ... read tcp <ctrl>:17070-><runner NAT IP>:<port>: read: connection reset by peer`
+  about 1 min *before* the client error, right after an `authn_login_success:user-admin`.
+- `TLS handshake error from <runner IP>: EOF` lines are constant background noise (the HA
+  client dials all addresses), so do not treat them as the cause. The same applies to the
+  steady `leaseexpiry ... database is locked` flood and to the `dialed mongodb` redial that
+  repeats about every 31 s: compare rates before and after the failure before blaming them.
+- The openstack crashdump `juju_status.txt` (taken later) shows the non-excluded apps active,
+  which means the failure was a false negative.
+
+**Recommendation:** make FCE/juju-wait retry with the remaining budget on transport errors.
+Also look at the runner → controller NAT path (conntrack/firewall RSTs). Re-running the layer
+usually succeeds.
+
+**From run:** 38660190213 (UUID c0112d76, tor3-sqa-dedicated_maas dh1_j6, branch main,
+2026-10-15; reset on controller 10.241.144.82 from 91.189.92.152 at 05:03:49).
+
+---
+
 ## Notes
 
 - The `juju_status_foundations-maas_openstack.json` / `.txt` files are captured **at bundle deploy time**, not at failure time. For the authoritative post-failure status, always use the crashdump's `juju_status.txt`.

@@ -139,6 +139,34 @@ snapd `service-control change in progress` during `refresh-certs`.
 
 ---
 
+### Pattern 3: `microk8s enable rook-ceph` fails silently (Helm chart download / DNS) — layer still passes
+
+**Symptom (`generated/microk8s/log.txt`, step `install_microceph`; layer reports success):**
+```
+juju exec ... -u microk8s/0 'microk8s enable rook-ceph'
+Error: looks like "https://charts.rook.io/release" is not a valid chart repository or cannot be reached:
+  ... dial tcp: lookup charts.rook.io on 127.0.0.53:53: ... i/o timeout
+Error: INSTALLATION FAILED: failed to download "rook-release/rook-ceph" at version "v1.11.9"
+...
+storageclass.storage.k8s.io/ceph-rbd created
+Error: INSTALLATION FAILED: failed to download "rook-release/rook-ceph-cluster"
+Finished step: microk8s:install_microceph
+```
+
+**Root cause:** Helm fetches the Rook chart directly from the Internet (not through the MAAS
+squid proxy), so it depends on the MAAS bind servers resolving external names via their
+`upstream_dns` forwarder. A transient upstream DNS outage makes the addon fail, but FCE does
+not check for `INSTALLATION FAILED` and only verifies that the `ceph-rbd` StorageClass exists.
+The cluster is left with a StorageClass whose provisioner (`rook-ceph.rbd.csi.ceph.com`) does
+not exist. The failure surfaces later, at the first PVC consumer — typically
+`juju_microk8s_controller` (see `steps/juju_microk8s_controller.md` Pattern 1).
+
+**Evidence to look for:**
+- MAAS tgz syslog (`grep -a`): `named[...]: timed out resolving 'charts.rook.io/A/IN': <upstream>#53` in the same minute on all bind servers; other external names timing out in the same window.
+- Crashdump syslogs: no `rook-ceph-operator` / `csi-rbdplugin` pods ever.
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes

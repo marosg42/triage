@@ -160,6 +160,10 @@ broken. Re-running the pipeline is expected to succeed.
 No curtin_config for `duosion` in the Swift bundle (meowth, pangoro, suicune, juju-4 present).
 MAAS journal (10.241.128.4) was truncated; lower-level cause not determinable.
 
+> **Before calling this a guest/hardware flake:** check every rack controller's
+> `var/log/maas/http/access.log` for a squashfs `404` to the node's IP (see Pattern 9). Low
+> CPU and no disk writes on the guest also fit a missing ephemeral squashfs.
+
 ---
 
 ### Pattern 3: All nodes stuck in `Deploying` — slow simultaneous OS installation exceeds 30-min timeout
@@ -609,6 +613,16 @@ forensics in one occurrence showed ~1 spinning vCPU, flat NIC/block counters, si
 serial pty). Re-running re-deploys the VM. Node successfully commissioned earlier in the
 same run, confirming it is not permanently broken.
 
+**Confirmed cause (one occurrence) — wrong boot disk:** MAAS picked the 20 GB cache disk
+(`drive-scsi0-0-0-2`) as the boot disk (`sda`), so curtin's `grub-install` targeted it. libvirt
+has `bootindex=2` on `drive-scsi0-0-0-0` (the 256 GB OS disk), which has no bootloader, so the
+firmware never finds a bootable disk.
+- Signature: the stuck node's curtin `grub-install` targets a disk whose serial is **not**
+  `drive-scsi0-0-0-0`. Healthy siblings have `sda` = `drive-scsi0-0-0-0`.
+- Prevention: after commissioning, set the boot disk explicitly by serial/size
+  (`maas <profile> block-device set-boot-disk <system_id> <id>`).
+- From run 38591325909.
+
 **From run 33738284104 (UUID 93ae9fa6-40f4-40ee-a2fc-7ad0e49ab99c, tor3-sqa-virtual_maas
 cluster_5, main, 2026-09-03):**
 
@@ -620,6 +634,58 @@ node3 (pc4rtf, 10.241.144.87, MAC 52:54:56:58:05:01): ALLOCATED 10:58:35, DEPLOY
 11:02:47–48, DEPLOYED 11:03:10–11. FCE timeout 11:29:16. happy-bot live forensics confirmed
 a running-but-inert guest on relay 10.241.144.1 (in-place ACPI reboot, ~1 spinning vCPU,
 no disk reads, silent serial pty) — installed OS never booted.
+
+---
+
+### Pattern 9: One node stuck `Deploying: Loading ephemeral` — its PXE rack returns 404 for the ephemeral squashfs
+
+**Symptom:** one node stays `Deploying` with substatus `Deploying: Loading ephemeral` until
+the 1800 s timeout. The other nodes deploy normally.
+
+**Root cause:** the boot resource was synced to only **one** region during the `maas` step
+(upstream ReadTimeout and Temporal `context deadline exceeded`). There is `Sync complete` on
+one host only and no `sync-bootresources:<sha>` workflow. The node PXE-boots from a rack whose
+region lacks the squashfs, so the download returns 404. Nodes served by the other rack get 200.
+
+**Evidence to look for:**
+- On the node's rack, `var/log/maas/http/access.log`: the node's last request is
+  `GET /images/<sha>/.../squashfs` → `404`.
+- From that rack's region: `/MAAS/boot-resources/<sha>/... 404`.
+- To find the node's rack: `grep -a "requested by <node-ip>"` in rackd syslog on all infra
+  hosts, then check each rack's `access.log`.
+- In the `maas` step window: upstream image ReadTimeout and Temporal
+  `context deadline exceeded`, then `Sync complete` on only one region.
+
+**Retryable:** Often. See also `maas.md` (the `list-boot-images == synced` check).
+
+**From run** 38647957756.
+
+---
+
+### Pattern 10: virtual_maas sshuttle tunnel drops during `wait_till_deployed` → `machine read` gets `Connection refused` (exit 2)
+
+**Symptom:** polling is normal (about 6 s per read). Then one `maas root machine read <id>`
+hangs for about 2 minutes. It fails with `[Errno 111] Connection refused` against
+`http://10.241.144.5:80/MAAS/api/2.0/` (exit 2, after the maas CLI usage text).
+
+**Not MAAS (compare with Pattern 6):** there is no gradual slowdown and no OAuth `Expired
+timestamp` error. Check `sshtest.txt` first.
+
+**Evidence to look for:**
+- `sshtest.txt`: the last `infra1` line is just before the hang, followed by
+  `kex_exchange_identification: Connection closed by remote host`.
+- Post-failure juju status and `Collect logs` `juju dump-db`: `api connection open timed out`.
+- `Collect logs`: `REMOTE HOST IDENTIFICATION HAS CHANGED` for 10.241.144.2. The MAAS tgz
+  then has Pokémon-host syslogs (dedicated_maas) and is useless for this run.
+- `version_collector_magpie.log` `connection reset by peer` to the controller IPs after the
+  drop also comes from the wrong hosts. It does not mean the lab guests were alive.
+- The relay's cause is not in the bundle (sshuttle runs as a daemon and logs nothing).
+  Testflinger `reserve_data.timeout` is 172800 s, so reservation expiry is ruled out.
+
+**Retryable:** Yes (infra/connectivity).
+
+**From run** 38697723460 (UUID 2dba4eea-2f1f-4a68-8b94-d7793a213bf9, cluster_3, relay
+`kroop` 10.241.5.21. The tunnel dropped between 10:04:03 and 10:05:05; failure at 10:06:46).
 
 ---
 

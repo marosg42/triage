@@ -256,6 +256,83 @@ workflow branch `main`, k8s-bundles branch `release-1.35`)._
 
 ---
 
+### Pattern 5: Underlying OpenStack Nova API `DBConnectionError` (HTTP 500) → machines `down`, Octavia LB `ERROR` → 60m `wait-for` timeout
+
+**Symptom:**
+```
+ERROR timed out waiting for "canonicalk8s-openstack" to reach goal state     (exit 1, wait_for duration_ms≈3604000)
+# final juju status:
+k8s        blocked 1/3  External load balancer error: provider error
+k8s-worker waiting 0/3  waiting for machine
+Machine 0  down  cannot run instance: request (https://<os-public-vip>/openstack-nova/v2.1/servers/…) …
+Machine 1  down  request (…/os-availability-zone) returned unexpected status: 500 …
+Machine 2  down  availability zone "nova" not valid
+Machine 3  down  failed to get list of flavour details
+```
+
+**Root cause:** the OpenStack cloud the model is deployed on (e.g. shared Sunbeam `cluster_N` on
+substrate `tor3-sqa-sunbeam`) has nova-api unable to reach its DB:
+`{"computeFault": {"code": 500, … <class 'oslo_db.exception.DBConnectionError'>"}}` (also
+`RemoteError`, and `<class 'TypeError'>` on `/os-availability-zone`, which Juju reports as
+`availability zone "nova" not valid`). Juju's provisioner retries each machine 10×/10 s, then marks
+it permanently `down`. The few machines that slip through come up, but the Octavia amphora LB for
+the k8s API (`openstack-integrator-<model-uuid-tail>-api-server-external`) goes to
+`provisioning_status=ERROR` → integrator `Error creating loadbalancer` / HTTP 409 "immutable" →
+k8s `blocked: External load balancer error: provider error`. Infra fault, not a charm bug.
+`juju_openstack_controller` typically **succeeded** minutes earlier (nova was healthy at bootstrap).
+
+**Evidence to look for:**
+- Model log in controller crashdump
+  (`generated/juju_openstack_controller/juju-crashdump-controller-*.tar.gz` →
+  `*/<n>/baremetal/var/log/juju/models/admin-canonicalk8s-openstack-*.log`; only the controller
+  machine running the model workers has the full file):
+  `grep -a 'computeFault\|cannot start instance for machine' …`
+- Persistence over time: `grep -a -B1 DBConnectionError */*/baremetal/var/log/juju/machine-*.log`
+  (instance-poller `servers/detail` 500s keep going until log collection).
+- `logsink.log` filtered by model-uuid prefix for `Invalid status when creating load balancer`,
+  `is immutable and cannot be updated (HTTP 409)`, `External load balancer error: provider error`.
+- Post-run `Clean existing openstack` in the runner log also shows `DBConnectionError (HTTP 500)`
+  and lists the LB as `ERROR / OFFLINE / amphora`.
+- Noise to ignore: steady-rate `juju.mongo … :37017: i/o timeout` WARNINGs on HA controller
+  machines (constant rate across the whole run, not correlated).
+- Limitation: Sunbeam-side nova/mysql/octavia logs are **not** in the bundle for this substrate,
+  so the DB-side cause and the LB→nova link can only be inferred.
+
+_Observed in: run 38552398839 / UUID `fa7dba9d-6e08-4491-b6ab-fad9acafe462`
+(substrate `tor3-sqa-sunbeam`, cluster_4)._
+
+If the outage begins after this step succeeds, it shows up later in `canonicalk8s_test` as a
+`juju add-unit` `flavors/detail` 500. See `canonicalk8s_test.md` Pattern 3.
+
+---
+
+### Pattern 6: Octavia amphora LB goes `ERROR` right after creation → k8s `blocked` → 60m `wait-for` timeout
+
+**Symptom:** `juju wait-for` times out after 60m, but unlike Pattern 5 **all machines are started**:
+```
+k8s                          blocked  External load balancer error: provider error
+cinder-csi                   waiting  (waiting for credentials)
+openstack-cloud-controller   waiting  (waiting for credentials)
+```
+`coredns` / `metrics-server` pods stay `Pending` (node still has the `uninitialized` taint because
+OCC never starts).
+
+**Root cause:** the Octavia amphora load balancer for the k8s API
+(`openstack-integrator-…-api-server-external`) moves to `provisioning_status=ERROR` immediately
+after creation. The integrator never deletes or recreates an `ERROR` LB, so it keeps trying to
+update it and k8s stays blocked. This is a cloud/Octavia issue for the cloud admins, not a charm bug.
+
+**Evidence to look for:**
+- Crashdump `logsink.log`, in this order: `is not PENDING_ status: ERROR` →
+  `Invalid status when creating load balancer` → repeated
+  `is immutable and cannot be updated. (HTTP 409)`.
+- Post-run *Clean existing openstack* in the runner log lists the LB as `ERROR / OFFLINE / amphora`.
+- **No** nova `computeFault` / `DBConnectionError` (that distinguishes it from Pattern 5).
+
+**From run** 38617118091 (substrate `ext-sqa-ps6_openstack`).
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes
@@ -270,7 +347,13 @@ _Add more patterns below as they are discovered._
   timeout; Pattern 3 fails after exactly **240 minutes** with exit code 124 and both
   `juju_application` resources still `Still creating...`; Pattern 4 fails in **<10 seconds** at
   `terraform init` with exit code 1 and `tf-validate` skipped. Check the elapsed time and the
-  exit code first — they identify the pattern immediately.
+  exit code first — they identify the pattern immediately. Pattern 5 also fails after the
+  60-minute `wait-for` (like Pattern 2) — distinguish by machines `down` with nova HTTP 500
+  `DBConnectionError` rather than `no metadata for … images`. Pattern 6 also fails after
+  60 minutes, but with all machines started and only the Octavia LB in `ERROR`.
+- **Substrate `tor3-sqa-sunbeam`:** Juju-on-OpenStack against a long-lived shared Sunbeam cloud
+  (`cluster_N`); no `generated/sunbeam/`, no MAAS logs, no `sshtest.txt`. Evidence comes from
+  the runner log and the `juju_openstack_controller` crashdump.
 - **VIP map (typical):** `traefik-public` → keystone **public** VIP (used by the credential
   `auth_url`); `traefik` → keystone **internal** VIP; `traefik-rgw` → RGW. Get the live mapping
   from `juju_status_openstack.txt` (`Serving at https://…`).

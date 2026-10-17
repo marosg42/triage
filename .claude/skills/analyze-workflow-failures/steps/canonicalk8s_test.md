@@ -186,6 +186,114 @@ re-allocate can hit it.
 
 ---
 
+### Pattern 2: virtual_maas tunnel loss → IP collision with physical dedicated_maas lab (juju x509 "juju-ca")
+
+**Symptom:**
+```
+FAILED tests/integration/test_k8s.py::<test> - jubilant._juju.CLIError: Command '['juju', 'status', ...]' returned non-zero exit status 1.
+ERROR unable to connect to API: tls: failed to verify certificate: x509: certificate signed by unknown authority
+(possibly because of "crypto/rsa: verification error" while trying to verify candidate authority certificate "juju-ca")
+```
+The error is a `CLIError`, not a `TimeoutError`, and it usually comes well before the `--timeout` deadline. Follow-on errors:
+- the same x509 error in `version_collector_canonicalk8s_test.log`;
+- in Collect logs, `maas root machines read` → `Authorization Error: Invalid API key.`
+
+**Root cause:** The runner's sshuttle tunnel to 10.241.144.0/21 died. Traffic then reached
+the physical dedicated_maas lab (`leafeon`/`mienfoo`/`swoobat`), which uses the same addresses
+and runs its own Juju controllers at the same host numbers (e.g. `juju-1` at .81). The foreign
+`juju-ca` causes the x509 error, and the foreign MAAS causes `Invalid API key`.
+
+**Evidence:**
+- `generated/sshtest.txt` ends early with `kex_exchange_identification: Connection closed by remote host`.
+  The monitor loop runs under `bash -e` and **dies on the first failure**, so the last entry is
+  not the time the tunnel died.
+- To date the drop, use the test log. The last `status changed` line plus the first x509 error
+  bound it, because `jubilant.wait` raises on the first failed poll.
+- `logs-*.tgz` hostnames are Pokémon names, so the archive comes from the physical lab and is
+  irrelevant to this run. It may still record the colliding controller, e.g. `juju-1 ... DEPLOYED`
+  or a lease for 10.241.144.81.
+- The physical-lab sshd journal (`journalctl -D <ip>/var/log/journal -t sshd`) shows runner logins
+  only after the failure.
+
+**Confounder:** A Pattern 1 PXE stall can be under way at the same time, for example a re-allocated
+node stuck in `Performing PXE boot` far longer than earlier redeploys in the same run. The
+virtual-lab MAAS logs are lost, so report it as "probable, unverifiable".
+
+**Verdict:** This is an infrastructure problem: the tunnel dropped, and the virtual and physical
+labs overlap in address space. It is not a canonical-k8s defect.
+
+---
+
+### Pattern 3: OpenStack substrate — Nova API `DBConnectionError` (HTTP 500) during `juju add-unit` (tor3-sqa-sunbeam)
+
+**Symptom:** a fast `CLIError` from `juju add-unit` (no `TimeoutError`), with model `canonicalk8s-openstack`:
+```
+FAILED tests/integration/test_k8s.py::test_remove_worker - jubilant._juju.CLIError: Command '['juju', 'add-unit', '--model', 'canonicalk8s-openstack', 'k8s-worker']' returned non-zero exit status 1.
+ERROR cannot add unit 1/1 to application "k8s-worker": ... failed to get list of flavour details
+caused by: request (https://<os-vip>:443/openstack-nova/v2.1/flavors/detail) returned unexpected status: 500; error info: {"computeFault": ... <class 'oslo_db.exception.DBConnectionError'>"}}
+```
+All remaining units are `active/idle` right before the call, so the k8s cluster is healthy.
+
+**Root cause:** the shared Sunbeam cloud that the model runs on has nova-api failing intermittently to reach
+its DB. On OpenStack, `juju add-unit` lists flavors synchronously and fails immediately on the 500.
+Any test that re-adds units can hit it. This is the same substrate fault as
+`canonicalk8s_openstack.md` Pattern 5, but it starts after the deploy has finished.
+
+**Evidence:**
+- Controller crashdump (`generated/juju_openstack_controller/juju-crashdump-controller-*.tar.gz`):
+  `grep -a 'error listing servers' */baremetal/var/log/juju/machine-*.log`. The instance-poller gets
+  `servers/detail?name=juju-.*` 500s, often starting well before the failing test (first one in
+  the reference run was 11:43, and the failure came at 12:34).
+- `audit.log` has the add-unit error with the exact time.
+- The post-run `Clean existing openstack` in `run.log` still shows `DBConnectionError (HTTP 500)`
+  mixed with successful calls. The outage is intermittent, not a hard down.
+- Sunbeam nova/mysql logs are not in the bundle. The DB-side cause can't be determined.
+
+**Verdict:** substrate (shared Sunbeam control plane) fault. It is not a canonical-k8s or test defect.
+
+_Observed in: run 38552324344 / UUID `7e103e21-a690-457a-8dda-a5cadbcdb6bc` (tor3-sqa-sunbeam,
+cluster_1, `test_remove_worker`)._
+
+---
+
+### Pattern 4: Replacement control-plane unit stuck "Waiting for Cluster token" (charm re-join; OpenStack)
+
+**Symptom:** `test_remove_non_leader_control_plane` fails with `TimeoutError: wait timed out after 5400s`.
+The new unit's machine is `running/ACTIVE` and `started`. Every other unit is `active/idle`.
+The new `k8s/N` unit is `waiting` / `'Waiting for Cluster token'`.
+
+**Timeline signature** (status diffs in `3-commands[0].log`):
+1. The new unit enters "Joining cluster" ~5 min after `add-unit`, so it did get a token.
+2. About 5 min later it flaps several times between maintenance and `blocked`
+   `'Failed to apply containerd_custom_registries, check logs for details'`.
+   At the same time the leader cycles "Allocating Worker/Control_Plane Cluster tokens".
+3. After that the unit is permanently "Waiting for Cluster token".
+   About every 10–25 min there are short 7–13 s maintenance blips; these are update-status retries that fail again.
+
+**Mechanism:** In `charm.py`, "Waiting for Cluster token" is the `@on_error` status of
+`_join_cluster` for `ReconcilerError/InvalidResponseError/K8sdConnectionError`. It means
+`get_cluster_name()` is empty, i.e. the node never joined.
+`_join_cluster` runs **before** `_config_containerd_registries` in `_reconcile`, so the
+containerd blocked status is not proven to be what broke the join.
+The same containerd error also appears briefly on healthy units during removal churn.
+
+**Evidence gap:** Usually unresolvable from the archive. The crashdump `juju ssh`/`scp` to all
+machines fails, and Collect logs `juju dump-db` gives `api connection open timed out`, so the runner lost the tenant network after the test.
+As a result, there is no `unit-k8s-N.log` and no `snap logs k8s.k8sd`.
+
+**Check also:** look for Neutron/Nova 500s during the run:
+`grep -n "status: 500" 3-commands[0].log`.
+Also check the API-server Octavia LB `operating_status` in the post-run `Clean existing openstack` output
+in `run.log` (it was `ERROR` in the reference run). Report these as possible substrate contributors; they are not proven causes.
+
+**Verdict:** most likely a k8s charm control-plane re-join/token defect (canonical/k8s-operator,
+seen on `1.36/candidate`, ubuntu 26.04). Substrate involvement cannot be excluded without unit logs.
+
+_Observed in: run 38691339416 / UUID `4a841446-ecec-4e8e-894b-55328a641369` (tor3-sqa-sunbeam,
+model `canonicalk8s-openstack`, new unit `k8s/3` on machine 8)._
+
+---
+
 _Add more patterns below as they are discovered._
 
 ## Notes
@@ -198,6 +306,7 @@ _Add more patterns below as they are discovered._
   `command ['timeout', '45s', 'juju', 'ssh', ...] failed` lines near the end of the log are
   crashdump collection against the *already-broken* machine and are **noise**, not the root cause.
 - On `virtual_maas`, the MAAS logs live on `infra1`/`infra2`/`infra3` = `10.241.144.2/.3/.4`.
+  If the `logs-*.tgz` hostnames are Pokémon names, check Pattern 2 first: the archive is not from this run's lab.
   `infra1` is usually the primary rack, `infra2` the secondary; map the rack IDs in
   `WorkflowID=configure-dhcp:<id>` to primary/secondary rather than guessing.
 - `libvirt/qemu/*.log` in the MAAS archive only covers the infra/juju/microk8s/vault VMs — there is

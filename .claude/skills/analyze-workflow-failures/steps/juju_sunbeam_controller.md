@@ -262,3 +262,37 @@ The cloud never self-heals — errors continue until log collection. Juju report
   22:5x → 00:0x; failure 23:16:52 on `POST /servers` (no VM ever created).
 
 Same defect on two clusters and two branches — reproducible, not branch-specific.
+
+---
+
+### Pattern 5: sshuttle SSH link loses return traffic mid-step → one openstack call hangs 120 s → `RemoteDisconnected`
+
+> **Distinct from Pattern 2** (hung daemon, stale REDIRECT → *instant* `ConnectionResetError` on
+> the first command). Here earlier openstack commands in the same step succeed, then one call
+> hangs ~2 min and fails with `RemoteDisconnected`; the sshuttle daemon actually exits.
+
+**Symptom:**
+```
+<previous openstack command output, e.g. `quota show` table>   (T)
+Unable to establish connection to https://<public-VIP>/openstack-keystone/v3/auth/tokens:
+  ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))   (T + ~120 s)
+```
+
+**Root cause:** The runner reaches the MetalLB VIPs only through `sshuttle ... -r <first node>`
+(`ServerAliveInterval=30 ServerAliveCountMax=3`). If traffic from that node back to the runner
+stops, the request still reaches Keystone (answered 201) but the reply is lost; ssh gives up after
+4×30 s = **120 s**, sshuttle exits and closes the redirected socket → `RemoteDisconnected`. Bare
+openstack commands in the step have no retry, so the step fails. Cloud and the node stay healthy.
+
+**Evidence to look for:**
+- `generated/sshuttle_metallb_range.txt`: `UP (pid N)` → `DOWN (pid unknown)` in the minute of the failure, DOWN thereafter.
+- `pods_openstack_logs.tgz` → `logs-openstack-keystone-*.txt`: last `openstacksdk/... POST /openstack-keystone/v3/auth/tokens ... 201` ≈ 120 s before the failure, none after.
+- First node's sosreport `var/log/auth.log`: the sshuttle session (`Accepted publickey ... from <runner IP>` at sshuttle start) shows `session closed` within ~100 ms of the runner error. **Grep the sosreport auth.log/journal, not `journalctl -u ssh`** — the latter can miss it.
+- No OOM / link / NIC errors on that node (`sar -n EDEV` on `var/log/sysstat/saDD`).
+
+**Recommendations:** supervise/restart sshuttle and probe through it; retry the pre-bootstrap
+openstack commands; or drop the tunnel where the runner has a direct route to the MetalLB range.
+
+**Observed in:**
+- Run 38664081501 / UUID `9e27e367-644e-41e3-bcc4-e4d5c1d08252`: testflinger cluster_1, tunnel via
+  shuckle (10.241.2.29). Keystone 201 at 06:37:36 → error 06:39:36.227 → shuckle session close 06:39:36.283.

@@ -30,10 +30,12 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── canonicalk8s_maas.md                            ← per-step logs, patterns, grep hints
 │   ├── canonicalk8s_openstack.md                       ← per-step logs, patterns, grep hints
 │   ├── canonicalk8s_test.md                            ← per-step logs, patterns, grep hints
+│   ├── canonicalk8s_test_openstack.md                  ← per-step logs, patterns, grep hints
 │   ├── existing_juju_maas_controller_microk8s.md       ← per-step logs, patterns, grep hints
 │   ├── juju_k8s_controller.md                          ← per-step logs, patterns, grep hints
 │   ├── juju_kubernetes_controller.md                   ← per-step logs, patterns, grep hints
 │   ├── juju_maas_controller.md                         ← per-step logs, patterns, grep hints
+│   ├── juju_microk8s_controller.md                     ← per-step logs, patterns, grep hints
 │   ├── k8s_cloud.md                                    ← per-step logs, patterns, grep hints
 │   ├── juju_openstack_controller.md                    ← per-step logs, patterns, grep hints                         ← per-step logs, patterns, grep hints
 │   ├── sunbeam_configure.md                            ← per-step logs, patterns, grep hints
@@ -41,6 +43,8 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── magpie.md                                       ← per-step logs, patterns, grep hints
 │   ├── metallb_microk8s.md                             ← per-step logs, patterns, grep hints
 │   ├── microk8s.md                                     ← per-step logs, patterns, grep hints
+│   ├── sunbeam_bootstrap.md                            ← per-step logs, patterns, grep hints
+│   ├── sunbeam_create_cluster.md                       ← per-step logs, patterns, grep hints
 │   ├── sunbeam_deploy.md                               ← per-step logs, patterns, grep hints
 │   ├── sunbeam_maas_deploy.md                          ← per-step logs, patterns, grep hints
 │   ├── sunbeam_prepare_env.md                          ← per-step logs, patterns, grep hints
@@ -55,10 +59,16 @@ This skill is split across files to keep context lean. Only load what you need:
 │   ├── deploy_charm_mysql_k8s.md                       ← per-step logs, patterns, grep hints
 │   ├── deploy_charm_postgresql.md                      ← per-step logs, patterns, grep hints
 │   ├── openstack.md                                    ← per-step logs, patterns, grep hints
+│   ├── openstack_tempest.md                            ← per-step logs, patterns, grep hints
 │   ├── prepare_shared_maas_clusters_for_deployment.md ← per-step logs, patterns, grep hints
 │   ├── redeploy_dedicated_maas_infra_nodes.md        ← per-step logs, patterns, grep hints
 │   ├── sunbeam_enable_telemetry.md                     ← per-step logs, patterns, grep hints
+│   ├── sunbeam_enable_tls.md                           ← per-step logs, patterns, grep hints
+│   ├── sunbeam_enable_vault.md                         ← per-step logs, patterns, grep hints
+│   ├── sunbeam_enable_dns.md                           ← per-step logs, patterns, grep hints
+│   ├── sunbeam_enable_secrets.md                       ← per-step logs, patterns, grep hints
 │   ├── sunbeam_enable_loadbalancer-amphora.md          ← per-step logs, patterns, grep hints
+│   ├── sunbeam_enable_loadbalancer.md                  ← per-step logs, patterns, grep hints
 │   ├── setup_virtual_lab.md                           ← per-step logs, patterns, grep hints
 │   ├── test_kubeflow.md                               ← per-step logs, patterns, grep hints
 │   ├── kubernetes-maas.md                             ← per-step logs, patterns, grep hints
@@ -72,7 +82,8 @@ This skill is split across files to keep context lean. Only load what you need:
     ├── maas-snap-apparmor-dbupgrade.md  ← deep-dive on specific recurring bug
     ├── metallb-speaker-wedge.md         ← MetalLB L2 speaker hang → VIP i/o timeout
     ├── mysql-k8s-tls-pebble-ready-deadlock.md ← mysql-k8s TLS hook error starves mysql-pebble-ready
-    └── vault-status-yaml-truncation.md  ← enable_vault crash on truncated juju status YAML
+    ├── vault-status-yaml-truncation.md  ← enable_vault crash on truncated juju status YAML
+    └── juju-k8s-controller-notready-vip-withdrawn.md ← controller pod NotReady → VIP withdrawn → `juju show-user` timeout
 ```
 
 After identifying the failed step (Step 2), load the matching step file:
@@ -115,6 +126,15 @@ local checkouts above.
 > `files/<UUID>/generated/happy-bot/` holds an independent triage of the same run. It is
 > **off-limits during Steps 1–7** and **mandatory in Step 8**. Reach your own root cause
 > from the raw logs first, write it down, and only then open happy-bot's files to compare.
+>
+> happy-bot output also leaks into two other files — treat these parts as quarantined too:
+> - `generated/github-runner/run.log` contains the in-runner **"AI failure analysis"** step
+>   (happy-bot's live session transcript) *after* the failed step's `##[error]` line (e.g.
+>   from ~line 13900+ or 65780+). During Steps 1–7 read only up to the failed step's end
+>   (`grep -n "##\[error\]" run.log`, then `head -n <error_line>`), and exclude the tail from
+>   broad greps.
+> - `generated/sunbeam/output.condensed.log` is happy-bot-generated and can omit `blocked`
+>   entries from status dumps — always check the original `output.log`.
 
 ### On Entry: Check for Existing Analysis First
 
@@ -146,6 +166,8 @@ subagents or download anything until the user confirms. If no file exists, conti
 > **⚠️ If the download script fails:**
 > Stop immediately. Report the error to the user. Do **not** attempt partial analysis based
 > only on GitHub logs.
+> If the Swift index returns **404**, verify the UUID and whether the run's log-upload step
+> completed; report that and do **not** write an analysis file.
 
 The work directory is `files/` in the current workspace (`/home/ubuntu/triage/files/`).
 
@@ -355,6 +377,14 @@ cat files/<UUID>/generated/sshtest.txt
   irrelevant to this run's failure.** The tunnel failure itself is likely the direct cause of
   any step failure that occurred at or after that time (the runner lost connectivity to the
   virtual cluster).
+- Timestamps come from `date` on the **remote** host, so a failed probe has no timestamp of
+  its own, and the loop may log nothing at all after the first failure. The last good entry
+  is the last `infra1` line.
+- **Tunnel-loss signatures:** `REMOTE HOST IDENTIFICATION HAS CHANGED` for `10.241.144.2` in
+  `sshtest.txt`; `sshuttle[...]: Connection to <relay> closed by remote host` / `c : fatal`
+  in `generated/github-runner/run.log`. After the drop, SSH to "nodes" reaches the
+  dedicated_maas hosts instead — e.g. `sunbeam: command not found` (exit 127) or MAAS API
+  `401 Unauthorized (Invalid API key)`.
 
 > **Important:** The `generated/maas/logs-*.tgz` for a `virtual_maas` run is collected by
 > SSHing through the tunnel. If the tunnel was down when log collection ran, the archive may
@@ -380,6 +410,10 @@ for d in files/maas-logs/*/; do
 done
 ```
 
+> **Alternate layout:** the archive may instead be a directory of per-host tarballs,
+> `generated/maas/logs-<ts>/<ip>.tgz`. Extract each one separately:
+> `for t in files/<UUID>/generated/maas/logs-*/*.tgz; do tar -xzf "$t" -C files/maas-logs; done`
+
 ### 5. Analyze MAAS Logs
 
 > **Only applicable for `virtual_maas` and `dedicated_maas` substrates.**
@@ -399,6 +433,9 @@ The archive contains per-node directories (e.g., `10.241.144.2/`, `10.241.144.3/
 | `var/snap/maas/common/log/db-stat.txt` | DB statistics | DB health overview |
 | `var/snap/maas/common/log/snap-perms.txt` | Snap file permissions | Snap version/revision info |
 | `var/log/libvirt/qemu/*.log` | VM console/QEMU logs | VM boot issues |
+
+> **Syslog note:** `dnsmasq` entries belong to libvirt's internal `virbr0` network, not
+> MAAS. MAAS DNS is `named` (BIND).
 
 #### Search patterns for common issues
 

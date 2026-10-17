@@ -131,6 +131,10 @@ powered it on (state: "started"), but the OS deployment never completed within t
 30-minute `bootstrap-timeout=1800` window. Juju waited the full timeout, then aborted.
 The controller never registered, so `juju show-controller foundations-maas` returns nothing.
 
+> **Check the tunnel first (virtual_maas):** if cleanup reports
+> `401 Unauthorized (Invalid API key)` or `sshtest.txt` shows a host-key change mid-bootstrap,
+> this is tunnel loss, not a provisioning stall. See Pattern 12.
+
 On virtual MAAS substrates, the machine is a KVM VM managed by libvirt.
 
 #### Sub-pattern A: VM failed to return after OS install reboot
@@ -704,6 +708,7 @@ verification error and aborting `wait_for_ready`.
   `Performing PXE boot` / `Loading ephemeral`; do not mistake that early deploy state for a
   MAAS provisioning timeout.
 - MAAS logs collected after the tunnel failure are absent or untrustworthy for this run.
+- If the tunnel drops during `juju bootstrap` instead, see Pattern 12.
 
 **How to confirm quickly:**
 ```bash
@@ -802,6 +807,37 @@ message.
 - Run 36516595760 (UUID: bf23df9b-ab34-4639-b543-ab057e4692bc, tor3-sqa-shared_maas dh1_j8_1,
   failing machine `afdxrc` / `juju-23-1-2` / 10.241.32.71 / zone2, pod host
   `solqa-shared-maas-server-23`)
+
+---
+
+### Pattern 12: Tunnel loss during bootstrap → misleading "started but not deployed"
+
+**Symptom:** looks like Pattern 2 — `juju bootstrap` times out at 1800 s — but the cleanup
+fails with a MAAS auth error:
+```
+ERROR failed to bootstrap model: ... is started but not deployed
+error cleaning up: ... 401 Unauthorized (Invalid API key)
+```
+
+**Root cause:** the `virtual_maas` sshuttle tunnel dropped mid-bootstrap. Juju's MAAS API polls
+then reached the dedicated_maas MAAS at the same IP, which rejects the virtual lab's API key.
+Juju never sees the instance reach `Deployed`. Same mechanism as Pattern 10, but it hits
+during `bootstrap` rather than `wait_for_ready`.
+
+**How to confirm quickly:**
+- `generated/sshtest.txt`: `REMOTE HOST IDENTIFICATION HAS CHANGED` (host-key change) during
+  the bootstrap window. See SKILL.md 4a-i.
+- The MAAS archive has Pokémon hostnames, with
+  `GET /MAAS/api/2.0/machines/?agent_name=...&id=<sysid>` → `401` about every 10 s:
+  ```bash
+  grep -a "id=<sysid>" files/maas-logs/*/var/log/maas/http/access.log | grep " 401 "
+  ```
+- Ignore the MAAS logs as evidence for this run's VM (they are from dedicated_maas).
+
+**Substrate:** `tor3-sqa-virtual_maas`
+
+**Observed in:**
+- Run 38672200059
 
 ---
 

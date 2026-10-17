@@ -86,6 +86,28 @@ post-deploy boot/network/cloud-init failure.
 - `generated/foundation.log`: later collection still timed out to the failed node's static infra IP.
 - `generated/maas/logs-*.tgz`: often missing entirely because the same unreachable node prevents deeper collection.
 
+### Pattern 2: Shared MAAS API hangs/resets mid-deploy (terraform + re-release both fail)
+
+**Symptom:**
+```text
+maas_instance.nodes["noma"]: Still creating... [04m10s elapsed]   # one resource stops polling first
+│ Error: Get "http://10.239.8.11:5240/MAAS/api/2.0/machines/7q6epf/": read tcp ...->10.239.8.11:5240: read: connection reset by peer
+(x3, all machines, same second)
+Release attempt 1/3 ... ConnectionResetError: [Errno 104] Connection reset by peer   (in http.client _read_status)
+ERROR: Failed to release machines after 3 attempts
+Deploy machines (attempt 2) ... skipped
+ERROR: Failed to deploy machines after 3 attempts
+```
+
+**Root cause:** The external **shared** MAAS region/API frontend (`maas_url` in the step env,
+`vars.SHARED_MAAS_URL`) hangs at the application layer. TCP still connects, but no HTTP status line comes back, and the connection is RST after 15–60 s. The canonical/maas Terraform provider does not retry polls, so it aborts. `release_with_retry.sh` only gives 3×30 s of retries. `Re-release after failed deploy number N` has no `continue-on-error`, so its failure **skips deploy attempts 2/3**, and the job dies about 4 min after the outage starts. This is a prerequisite-infra outage; the shared MAAS logs are not in the bundle.
+
+**Evidence to look for:**
+- Initial release POSTs in `generated/maas/output.log` already slow (e.g. 6 s / 15 s / 51 s instead of ~1–2 s), which is an early warning.
+- In run.log, per-resource `Still creating` lines show which poll hung first, giving the real onset about 60 s before the reset.
+- `output.log` re-release entries show only `Getting machine with hostname <first host>`, with nothing after.
+- Concurrent `read ECONNRESET` from Vault or Temporal timeouts in the same window can appear. Do not treat them as proof of a runner network issue; the live `curl` (0 bytes while TCP connects) is what decides it.
+
 ---
 
 ## Notes

@@ -404,7 +404,45 @@ even when the remote validation command continues and completes successfully on 
 3. Emit periodic progress from long remote validation commands so transport issues are easier
    to distinguish from validation failures.
 
+**Variant — persistent lab-wide outage (any profile, result unknown):** the same
+`Timeout, server … not responding` can hit `quick`, `smoke` or `refstack`. If the outage
+persists, the following happen together:
+- no `validation_*`, `juju_status_openstack.txt` or `pods_*` artifacts are collected;
+- collect-logs fails on **every** node with `kex_exchange_identification: read: Connection
+  reset by peer`;
+- `generated/sshuttle_metallb_range.txt` flips `UP`→`DOWN` some minutes later.
+
+In that case `Failed: 0` cannot be confirmed. Report it as a runner↔lab network outage with
+an unknown validation result, not as a Tempest failure. The sshuttle monitor's `UP` may reflect
+only that the process exists, so do not use it to prove the node was still reachable.
+
 ---
+
+### Pattern 7: `enable validation` Timeout With Healthy Model — Runner→Controller API Stall (MAAS provider)
+
+**Symptom:** Same 3600 s `Timed out enabling validation: TimeoutError('wait timed out after
+3599.99...s')` as Pattern 5, but the embedded final status shows **every** app/unit
+`active`/`idle`, including `tempest/0` `active since` a time well before the timeout. No
+`validation_*.log` exists.
+
+**Root cause:** On the MAAS provider, `sunbeam enable validation` runs on the **runner**
+(`[localhost]`) and the jubilant wait polls `juju status` against the external Juju controller
+(juju-1/2/3:17070). If the runner's egress path (transparent `aproxy_nosni` proxy → upstream
+proxy returning HTTP 503 to CONNECT) blocks the controller API, one `juju status` subprocess
+retries internally for ~1 h, the deadline passes, and the wait raises with the (healthy)
+status it finally gets. CI-runner flake, not a charm/OpenStack bug.
+
+**Evidence to look for:**
+- `generated/sunbeam/all_snaps.tgz` → `home/ubuntu/snap/openstack/common/logs/sunbeam-<ts>.log`
+  (the runner-side sunbeam client log): `Waiting for apps ['tempest'] to be {'active'}`, then
+  `jubilant.wait INFO wait: status changed:` entries every ~12–60 s that suddenly stop for
+  ~3600 s; the next diff is the stale `tempest maintenance → active` change.
+- `juju_debug_log_openstack.txt`: `unit-tempest-0 ... Setting active status` ~10 min after deploy.
+- Runner journal `aproxy_nosni` 503s / controller `machine-N.log` FullStatus gap are only
+  visible live (happy-bot); not in the Swift bundle.
+
+**Fix candidates:** exempt `:17070` controller endpoints from the runner proxy; per-call
+timeout + retry on `juju status` in the wait; re-check status before failing the step.
 
 _Add more patterns below as they are discovered._
 

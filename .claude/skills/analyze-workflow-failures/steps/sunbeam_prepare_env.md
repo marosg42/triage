@@ -259,6 +259,41 @@ tar -xOf "$SOS" '*/sos_commands/logs/journalctl_--no-pager_--boot' \
 **Recommendation:** Add retry/backoff around `clean_disks.py` SSH probes on Testflinger nodes,
 especially for exit 255 before authentication.
 
+### Pattern 7: Testflinger provisioning outage — jobs `complete` with no IP, retries fail fast
+
+**Symptom (in GitHub Actions log):**
+```text
+testflinger-submitter DEBUG Job <id> status: complete          # no preceding "Found IP"
+testflinger-submitter INFO Deploying N machines on ['sqa-sunbeam-X'] ...   # retry round
+...
+testflinger-submitter DEBUG FAILED!!!
+Failed to deploy 7 machines, only K were deployed
+##[error]Process completed with exit code 1.
+```
+
+**Root cause:** On `tor3-sqa-testflinger`, `testflinger/deploy_multiple_machines.py` submits
+one provision job per agent, then retries failures twice on other available agents. A
+lab-side Testflinger/MAAS provisioning problem makes jobs reach `complete` without ever
+reporting an IP. Signature that it is systemic rather than per-machine:
+- Retry-round jobs fail in **~1–2 min**, while real provisions take ~16–20 min. They fail
+  before any OS deployment.
+- Agents on healthy positive streaks flip to `-1` in the later queue snapshots that the
+  submitter prints.
+- No traceback, and no node/sosreport data in `generated/sunbeam/`.
+The submitter can also reselect agents that just failed.
+
+**Quick check:**
+```bash
+grep -E "Going to use|Submitted job|Found IP|status: complete|Failed to deploy" run_failed.log
+# Compare submit→complete durations per round; fast retry failures = systemic.
+```
+The exact provision error is only in the Testflinger job log
+(`https://testflinger.canonical.com/jobs/<id>`, auth required). It is not in the bundle.
+
+**Recommendation:** Check lab MAAS/Testflinger health for the window. In the submitter,
+exclude just-failed agents and back off when a whole round fails fast. Also save failed-job
+provision logs into the bundle.
+
 ---
 
 _Add more patterns below as they are discovered._

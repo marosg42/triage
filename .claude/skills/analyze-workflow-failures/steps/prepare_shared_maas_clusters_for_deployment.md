@@ -79,6 +79,22 @@ Terminated
 
 ---
 
+### Pattern 3: Single `machine release` call stalls ~15 min, then exits 2
+
+**Symptom:**
+```text
+10:04:38 h48qrb
+10:04:45 gasnnd            <- last echoed system ID
+10:19:46 ##[error]Process completed with exit code 2.   (≈900 s later, no other output)
+```
+
+**Root cause:** In `Release Machines`, one `maas sqa-bot machine release $machine > /dev/null 2>&1` call does not return for about 900 s, almost exactly 15 minutes, and then exits 2. The CLI's `parser.error()` path produces exit 2 for any HTTP or transport exception. Live MAAS events showed the release itself completing server-side in about 6 s, so the stall is in the HTTP response path (proxy or idle timeout between the runner and 10.239.7.110), not in MAAS processing. The loop has no per-call timeout, retry or error tolerance, so `bash -e` fails the whole run before any layer deploys. Retrying is safe because release is idempotent.
+
+**Evidence to look for:**
+- `generated/github-runner/run.log`: several system IDs echoed a few seconds apart, then a gap of about 900 s, then exit code **2**. Exit 143 instead would mean a runner kill (Pattern 2).
+- The login and the pool `machines read` both succeeded and there is no `IncompleteRead`, which rules out Pattern 1.
+- stderr is discarded, so the archive cannot show the HTTP error. Only live MAAS events (`Releasing`→`Released` timestamps) can confirm that the release completed server-side.
+
 _Add more patterns below as they are discovered._
 
 ## Notes
